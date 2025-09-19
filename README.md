@@ -95,3 +95,15 @@ I am thus licensing Terminator as GPL v2 only.
 Cristian Grada provided the old icon under the same licence.
 Cory Kontros provided the new icon under the CC-by-SA licence.
 For other authorship information, see debian/copyright
+
+## GTK 4
+
+Terminator now runs on GTK 4 and VTE (GTK4 build):
+
+- Dependencies (examples):
+  - Debian/Ubuntu: `sudo apt install gir1.2-gtk-4.0 gir1.2-vte-3.91 libvte-2.91-gtk4-0 python3-gi`
+  - Fedora: `sudo dnf install gtk4 vte-gtk4 python3-gobject`
+  - Arch: `sudo pacman -S gtk4 vte4 python-gobject`
+- Run: `./terminator`
+
+This opens a single window with one VTE terminal using Gtk 4 (4.0) and VTE 3.91. It is a starting point to gradually port the full feature set.

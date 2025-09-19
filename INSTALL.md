@@ -54,6 +54,29 @@ See `--help` for an overview of the available options; e.g. `--prefix` to
 install to a custom base directory, and `--without-gettext` to avoid
 installing natural language support files.
 
+### GTK 4
+
+Terminator now requires Gtk 4 and VTE built for Gtk 4 (GI version 3.91). Install the following packages for your distro, then run `./terminator`.
+
+- Debian/Ubuntu (Debian 12+, Ubuntu 23.10+):
+
+  sudo apt update
+  sudo apt install gir1.2-gtk-4.0 gir1.2-vte-3.91 libvte-2.91-gtk4-0 python3-gi
+
+- Fedora:
+
+  sudo dnf install gtk4 vte-gtk4 python3-gobject
+
+- Arch Linux:
+
+  sudo pacman -S gtk4 vte4 python-gobject
+
+Run from the source tree:
+
+    ./terminator
+
+If Terminator reports missing introspection packages, install the listed dependencies and try again.
+
 setup.py supports basic uninstallation provided `--record` was used for
 installation as above:
 
@@ -118,4 +141,3 @@ Ubuntu       | copied from Debian | [launchpad.net/ubuntu] | | [bugs.launchpad.n
 A more extensive list can be found on Repology:
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/terminator.svg?columns=3)](https://repology.org/project/terminator/versions)
-
