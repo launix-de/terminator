@@ -1788,3 +1788,10 @@ msgstr ""
 
 #~ msgid "Other Encodings"
 #~ msgstr "Басқа кодылау"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML ретінде көшіру"
+
+msgid "Copy selection as HTML"
+msgstr "Таңдалғанды HTML ретінде көшіру"

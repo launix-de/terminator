@@ -1899,3 +1899,10 @@ msgstr "Karta %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Inne kodowania"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiuj jako HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiuj zaznaczenie jako HTML"

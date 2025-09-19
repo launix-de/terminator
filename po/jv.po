@@ -1851,3 +1851,10 @@ msgstr ""
 
 #~ msgid "Other Encodings"
 #~ msgstr "Nggawe Sandi liyane"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Salin dadi HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Salin pilihan dadi HTML"

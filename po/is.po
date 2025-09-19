@@ -1851,3 +1851,10 @@ msgstr "Flipi %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Aðrar kóðanir"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Afrita sem HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Afrita val sem HTML"

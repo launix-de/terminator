@@ -1833,3 +1833,10 @@ msgstr "Teigur %d"
 
 #~ msgid "Thai"
 #~ msgstr "Tailendskt"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Avrita sum HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Avrita valt sum HTML"

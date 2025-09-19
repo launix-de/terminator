@@ -1856,3 +1856,10 @@ msgstr "Zavihek %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Drugi nabori znakov"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiraj kot HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiraj izbor kot HTML"

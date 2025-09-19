@@ -1887,3 +1887,10 @@ msgstr "לשונית %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "קידודים אחרים"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_העתקה כ־HTML"
+
+msgid "Copy selection as HTML"
+msgstr "העתקת הבחירה כ־HTML"

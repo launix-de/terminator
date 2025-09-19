@@ -1823,3 +1823,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "ไทย"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_คัดลอกเป็น HTML"
+
+msgid "Copy selection as HTML"
+msgstr "คัดลอกที่เลือกเป็น HTML"

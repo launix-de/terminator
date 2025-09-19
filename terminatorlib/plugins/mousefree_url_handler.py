@@ -138,6 +138,7 @@ class MouseFreeURLHandler(plugin.Plugin):
                 #so when we start search last item be selected
                 self.vte.search_find_previous()
                 self.get_selected_url() # dbg url print
+                dbg('MouseFreeURLHandler: copy URL via vte.copy_clipboard() [find next start]')
                 self.vte.copy_clipboard()
                 return True
             else:
@@ -148,6 +149,7 @@ class MouseFreeURLHandler(plugin.Plugin):
             else:
                 self.matches_ptr = 0
 
+            dbg('MouseFreeURLHandler: copy URL via vte.copy_clipboard() [find next advance]')
             self.vte.copy_clipboard()
             self.get_selected_url() # dbg url print
             return True
@@ -158,6 +160,7 @@ class MouseFreeURLHandler(plugin.Plugin):
                 self.extract()
                 self.vte.search_find_previous()
                 self.get_selected_url() # dbg url print
+                dbg('MouseFreeURLHandler: copy URL via vte.copy_clipboard() [find prev start]')
                 self.vte.copy_clipboard()
                 return True
             else:
@@ -168,6 +171,7 @@ class MouseFreeURLHandler(plugin.Plugin):
             elif len(self.matches):
                 self.matches_ptr = len(self.matches)-1
 
+            dbg('MouseFreeURLHandler: copy URL via vte.copy_clipboard() [find prev advance]')
             self.vte.copy_clipboard()
             self.get_selected_url() # dbg url print
             return True
@@ -219,4 +223,3 @@ class MouseFreeURLHandler(plugin.Plugin):
                         len(self.searchtext), regex_flags_pcre2)
 
         self.vte.search_set_regex(searchre, 0)
-

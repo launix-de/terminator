@@ -1883,3 +1883,10 @@ msgstr "Tab %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Pengkodean Lainnya"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Salin sebagai HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Salin pilihan sebagai HTML"

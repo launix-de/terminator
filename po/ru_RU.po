@@ -1772,3 +1772,10 @@ msgstr ""
 
 #~ msgid "Armenian"
 #~ msgstr "Армянская"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Копировать как HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Копировать выделение как HTML"

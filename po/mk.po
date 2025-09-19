@@ -1851,3 +1851,10 @@ msgstr "Табот %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Други шифрирања"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Копирај како HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Копирај го изборот како HTML"

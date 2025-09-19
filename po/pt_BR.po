@@ -1772,3 +1772,10 @@ msgstr "Grupo de janelas %s"
 #, python-format
 msgid "Tab %d"
 msgstr "Aba %d"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar como HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar a seleção como HTML"

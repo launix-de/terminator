@@ -1747,3 +1747,10 @@ msgstr ""
 #, python-format
 msgid "Tab %d"
 msgstr ""
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Cóipeáil mar HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Cóipeáil an roghnú mar HTML"

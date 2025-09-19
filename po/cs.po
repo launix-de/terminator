@@ -1885,3 +1885,10 @@ msgstr "Panel %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Ostatní kódování"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopírovat jako HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopírovat výběr jako HTML"

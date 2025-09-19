@@ -1855,3 +1855,10 @@ msgstr "Välilehti %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Muut merkistöt"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopioi HTML-muodossa"
+
+msgid "Copy selection as HTML"
+msgstr "Kopioi valinta HTML-muodossa"

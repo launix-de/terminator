@@ -1873,3 +1873,10 @@ msgstr "Karta %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Iné kódovania"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopírovať ako HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopírovať výber ako HTML"

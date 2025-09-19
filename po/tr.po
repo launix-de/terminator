@@ -1857,3 +1857,10 @@ msgstr "Sekme %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Diğer Kodlamalar"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML olarak kopyala"
+
+msgid "Copy selection as HTML"
+msgstr "Seçimi HTML olarak kopyala"

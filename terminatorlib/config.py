@@ -145,6 +145,7 @@ DEFAULTS = {
             'split_vert'       : '<Shift><Control>e',
             'close_term'       : '<Shift><Control>w',
             'copy'             : '<Shift><Control>c',
+            'copy_html'        : '<Shift><Control>h',
             'paste'            : '<Shift><Control>v',
             'paste_selection'  : '',
             'toggle_scrollbar' : '<Shift><Control>s',

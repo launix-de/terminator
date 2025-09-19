@@ -1785,3 +1785,10 @@ msgstr ""
 
 #~ msgid "Celtic"
 #~ msgstr "Կելտական"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Պատճենել որպես HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Պատճենել ընտրվածը որպես HTML"

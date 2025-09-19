@@ -1841,3 +1841,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "ტაილანდური"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_კოპირება როგორც HTML"
+
+msgid "Copy selection as HTML"
+msgstr "მონიშნულის კოპირება როგორც HTML"

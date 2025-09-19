@@ -1862,3 +1862,10 @@ msgstr "Καρτέλα %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Άλλες Κωδικοποιήσεις"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Αντιγραφή ως HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Αντιγραφή επιλογής ως HTML"

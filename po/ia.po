@@ -1845,3 +1845,10 @@ msgstr "Scheda %d"
 
 #~ msgid "Default"
 #~ msgstr "Predefinite"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar como HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar le selection como HTML"

@@ -1861,3 +1861,10 @@ msgstr "탭 %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "기타 인코딩"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML로 복사"
+
+msgid "Copy selection as HTML"
+msgstr "선택 항목을 HTML로 복사"

@@ -1881,3 +1881,10 @@ msgstr "Separador %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Outras codificações"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar como HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar a seleção como HTML"

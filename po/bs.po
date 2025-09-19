@@ -1880,3 +1880,10 @@ msgstr "Tab %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Ostala kodiranja"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiraj kao HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiraj odabir kao HTML"

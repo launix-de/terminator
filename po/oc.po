@@ -1851,3 +1851,10 @@ msgstr "Tablèu %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Autres  Encodatges"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar coma HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar la seleccion coma HTML"

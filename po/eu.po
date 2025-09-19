@@ -1859,3 +1859,10 @@ msgstr "Fitxa %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Beste kodeketak"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiatu HTML gisa"
+
+msgid "Copy selection as HTML"
+msgstr "Hautapena HTML gisa kopiatu"

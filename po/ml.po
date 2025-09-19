@@ -1839,3 +1839,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "തായി"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML ആയി പകർത്തുക"
+
+msgid "Copy selection as HTML"
+msgstr "തിരഞ്ഞെടുത്തത് HTML ആയി പകർത്തുക"

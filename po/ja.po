@@ -1855,3 +1855,10 @@ msgstr "タブ%d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "その他のエンコーディング"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML としてコピー"
+
+msgid "Copy selection as HTML"
+msgstr "選択範囲を HTML としてコピー"

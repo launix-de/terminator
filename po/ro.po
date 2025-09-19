@@ -1861,3 +1861,10 @@ msgstr "Tab %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Alte codificări"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiază ca HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiază selecția ca HTML"

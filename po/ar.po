@@ -1856,3 +1856,10 @@ msgstr "تبويب %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "ترميزات اخرى"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_نسخ كـ HTML"
+
+msgid "Copy selection as HTML"
+msgstr "نسخ التحديد كـ HTML"

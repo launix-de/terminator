@@ -1821,3 +1821,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "Tiếng Thái"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Sao chép dưới dạng HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Sao chép vùng chọn dưới dạng HTML"

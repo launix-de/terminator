@@ -1833,3 +1833,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "Tai"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopjo si HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopjo përzgjedhjen si HTML"

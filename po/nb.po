@@ -1862,3 +1862,10 @@ msgstr "Tab %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Andre tegnkodinger"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopier som HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopier utvalg som HTML"

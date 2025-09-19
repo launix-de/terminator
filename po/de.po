@@ -1535,6 +1535,14 @@ msgstr "_Link öffnen"
 msgid "_Copy address"
 msgstr "_Adresse kopieren"
 
+# New menu item: Copy as HTML
+msgid "_Copy as HTML"
+msgstr "_Als HTML kopieren"
+
+# Keybinding description
+msgid "Copy selection as HTML"
+msgstr "Auswahl als HTML kopieren"
+
 #: ../terminatorlib/terminal_popup_menu.py:101
 msgid "_Copy"
 msgstr "_Kopieren"

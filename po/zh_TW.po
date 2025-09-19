@@ -1869,3 +1869,10 @@ msgstr "分頁 %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "其他編碼"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_複製為 HTML"
+
+msgid "Copy selection as HTML"
+msgstr "將選取內容複製為 HTML"

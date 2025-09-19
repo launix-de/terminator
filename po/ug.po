@@ -1746,3 +1746,10 @@ msgstr ""
 #, python-format
 msgid "Tab %d"
 msgstr ""
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML سۈپىتىدە كۆچۈر"
+
+msgid "Copy selection as HTML"
+msgstr "تاللانغىنى HTML سۈپىتىدە كۆچۈر"

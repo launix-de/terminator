@@ -1845,3 +1845,10 @@ msgstr ""
 
 #~ msgid "Other Encodings"
 #~ msgstr "අනෙක් කේතීකරණයන්"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "HTML ලෙස පිටපත් කරන්න (_C)"
+
+msgid "Copy selection as HTML"
+msgstr "තෝරාගත් දේ HTML ලෙස පිටපත් කරන්න"

@@ -1823,3 +1823,10 @@ msgstr ""
 
 #~ msgid "Persian"
 #~ msgstr "فارسی"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML کے طور پر کاپی کریں"
+
+msgid "Copy selection as HTML"
+msgstr "انتخاب کو HTML کے طور پر کاپی کریں"

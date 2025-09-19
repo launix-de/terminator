@@ -1752,3 +1752,10 @@ msgstr ""
 
 #~ msgid "Persian"
 #~ msgstr "فارسی"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_لەکەڵ HTML کۆپی بکە"
+
+msgid "Copy selection as HTML"
+msgstr "هەڵبژێردراو کۆپی بکە وەک HTML"

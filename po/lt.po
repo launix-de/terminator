@@ -1855,3 +1855,10 @@ msgstr "Kortelė %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Kitos koduotės"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopijuoti kaip HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopijuoti pažymėtą kaip HTML"

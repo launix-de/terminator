@@ -1864,3 +1864,10 @@ msgstr "Scheda %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Altre codifiche"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copia come HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copia la selezione come HTML"

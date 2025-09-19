@@ -1852,3 +1852,10 @@ msgstr "தாவல் %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "ஏனைய குறியாக்கம்"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML ஆக நகலெடு"
+
+msgid "Copy selection as HTML"
+msgstr "தேர்வை HTML ஆக நகலெடு"

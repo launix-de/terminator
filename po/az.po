@@ -1841,3 +1841,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "Tay dili"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML kimi kopyala"
+
+msgid "Copy selection as HTML"
+msgstr "Seçiləni HTML kimi kopyala"

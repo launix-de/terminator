@@ -1746,3 +1746,10 @@ msgstr ""
 #, python-format
 msgid "Tab %d"
 msgstr ""
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML म्हणून प्रत करा"
+
+msgid "Copy selection as HTML"
+msgstr "निवड HTML म्हणून प्रत करा"

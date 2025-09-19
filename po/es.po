@@ -1909,3 +1909,10 @@ msgstr "Solapa %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Otras codificaciones"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar como HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar la selección como HTML"

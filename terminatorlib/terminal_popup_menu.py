@@ -156,10 +156,21 @@ class TerminalPopupMenu(object):
             menu.append(Gtk.SeparatorMenuItem())
 
         item = self.menu_item(Gtk.ImageMenuItem, 'copy', _('_Copy'))
-        item.connect('activate', lambda x: terminal.vte.copy_clipboard())
+        # Funnel through key_copy to unify logging/behavior
+        item.connect('activate', lambda x: terminal.key_copy())
         item.set_sensitive(terminal.vte.get_has_selection())
-
         menu.append(item)
+
+        # Copy as HTML (after Copy)
+        try:
+            icon = Gtk.Image.new_from_stock(Gtk.STOCK_COPY, Gtk.IconSize.MENU)
+            html_item = self.menu_item(Gtk.ImageMenuItem, 'copy_html', _('_Copy as HTML'))
+            html_item.set_property('image', icon)
+        except Exception:
+            html_item = self.menu_item(Gtk.MenuItem, 'copy_html', _('_Copy as HTML'))
+        html_item.connect('activate', lambda x: terminal.copy_selection_as_html())
+        html_item.set_sensitive(terminal.vte.get_has_selection())
+        menu.append(html_item)
 
         item = self.menu_item(Gtk.ImageMenuItem, 'paste', _('_Paste'))
         item.connect('activate', lambda x: terminal.paste_clipboard())

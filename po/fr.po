@@ -1782,3 +1782,10 @@ msgstr "Groupe de fenêtres %s"
 #, python-format
 msgid "Tab %d"
 msgstr "Onglet %d"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copier en HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copier la sélection en HTML"

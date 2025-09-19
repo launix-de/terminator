@@ -1854,3 +1854,10 @@ msgstr "%d језичак"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Друга кодирања"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Копирај као HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Копирај избор као HTML"

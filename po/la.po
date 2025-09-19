@@ -1773,3 +1773,10 @@ msgstr ""
 
 #~ msgid "Croatian"
 #~ msgstr "Lingua Croatica"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Exscribere ut HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Exscribere selectionem ut HTML"

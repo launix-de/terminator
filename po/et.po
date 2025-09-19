@@ -1851,3 +1851,10 @@ msgstr "Vaheleht %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Muud kodeeringud"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopeeri HTML-ina"
+
+msgid "Copy selection as HTML"
+msgstr "Kopeeri valik HTML-ina"

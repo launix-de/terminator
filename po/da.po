@@ -1875,3 +1875,10 @@ msgstr "Faneblad %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Andre Tegnsæt"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiér som HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiér markering som HTML"

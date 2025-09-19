@@ -1852,3 +1852,10 @@ msgstr "Cilne %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Citi kodējumi"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopēt kā HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopēt izvēlēto kā HTML"

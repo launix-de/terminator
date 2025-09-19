@@ -1868,3 +1868,10 @@ msgstr "Вкладка %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Інше кодування"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Копіювати як HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Копіювати виділене як HTML"

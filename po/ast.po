@@ -1854,3 +1854,10 @@ msgstr "llingüeta %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Otres codificaciones"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copiar como HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copiar la seleición como HTML"

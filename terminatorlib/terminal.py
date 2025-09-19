@@ -6,6 +6,7 @@
 import os
 import signal
 import gi
+gi.require_version('Gtk', '3.0')
 from gi.repository import GLib, GObject, Pango, Gtk, Gdk, GdkPixbuf, cairo
 gi.require_version('Vte', '2.91')  # vte-0.38 (gnome-3.14)
 from gi.repository import Vte
@@ -406,7 +407,9 @@ class Terminal(Gtk.VBox):
 
     def maybe_copy_clipboard(self):
         if self.config['copy_on_selection'] and self.vte.get_has_selection():
+            dbg('maybe_copy_clipboard: copy_on_selection active -> vte.copy_clipboard()')
             self.vte.copy_clipboard()
+            dbg('maybe_copy_clipboard: vte.copy_clipboard() done')
 
     def connect_signals(self):
         """Connect all the gtk signals and drag-n-drop mechanics"""
@@ -1808,6 +1811,65 @@ class Terminal(Gtk.VBox):
         widget.get_window().process_updates(True)
         return False
 
+    def copy_selection_as_html(self):
+        """Copy the current screen contents as HTML to the clipboard.
+        extract VTE's HTML screen dump and set it.
+        """
+        dbg('copy_selection_as_html: invoked')
+        # Simplified path: extract only the screen HTML and copy it.
+        try:
+            if hasattr(self.vte, 'get_text_range_format'):
+                rows = self.vte.get_row_count()
+                cols = self.vte.get_column_count()
+                dbg(f'copy_selection_as_html: using get_text_range_format(HTML) rows={rows} cols={cols}')
+                html_screen = self.vte.get_text_range_format(
+                    Vte.Format.HTML, 0, 0, rows - 1, cols - 1
+                )[0]
+                if html_screen:
+                    self._set_clipboard_html(html_screen, '')
+                    dbg('copy_selection_as_html: set clipboard with html_screen only (short-circuit)')
+                    return
+        except Exception as e:
+            err('copy_selection_as_html: %s: %s' % (type(e).__name__, e))
+
+    def key_copy_html(self):
+        """Keybinding handler to copy selection as HTML."""
+        self.copy_selection_as_html()
+
+    def _set_clipboard_html(self, html_text, plain_text):
+        """Put both text/html and text/plain onto the clipboard."""
+        dbg(f'_set_clipboard_html: html_len={len(html_text) if html_text else 0} plain_len={len(plain_text) if plain_text else 0}')
+
+        targets = [
+            Gtk.TargetEntry.new('text/html', 0, 0),
+            Gtk.TargetEntry.new('text/plain', 0, 1),
+        ]
+    
+        payload = {"html": html_text, "plain": plain_text}
+    
+        def on_get_cb(_clipboard, selection_data, info, data):
+            if info == 0:
+                selection_data.set(selection_data.get_target(), 8, data['html'].encode("utf-8"))
+            else:
+                selection_data.set_text(data['plain'], -1)
+    
+        def on_clear_cb(_clipboard, data):
+            pass
+    
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_with_data(targets, on_get_cb, on_clear_cb, payload)
+        try:
+            clipboard.store()
+        except Exception:
+            pass
+    
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_PRIMARY)
+        clipboard.set_with_data(targets, on_get_cb, on_clear_cb, payload)
+        try:
+            clipboard.store()
+        except Exception:
+            pass
+
     def describe_layout(self, count, parent, global_layout, child_order, save_cwd = False):
         """Describe our layout"""
         layout = {'type': 'Terminal', 'parent': parent, 'order': child_order}
@@ -1887,8 +1949,11 @@ class Terminal(Gtk.VBox):
         self.zoom_out()
 
     def key_copy(self):
+        dbg('key_copy: invoking vte.copy_clipboard()')
         self.vte.copy_clipboard()
+        dbg('key_copy: vte.copy_clipboard() done')
         if self.config['clear_select_on_copy']:
+            dbg('key_copy: clear_select_on_copy -> unselect_all')
             self.vte.unselect_all()
 
     def key_paste(self):

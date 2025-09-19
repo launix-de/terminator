@@ -1851,3 +1851,10 @@ msgstr "%d ট্যাব"
 
 #~ msgid "Other Encodings"
 #~ msgstr "অন্যান্য এনকোডিং সমূহ"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML হিসেবে কপি করুন"
+
+msgid "Copy selection as HTML"
+msgstr "নির্বাচিতটিকে HTML হিসেবে কপি করুন"

@@ -1855,3 +1855,10 @@ msgstr "Pestanya %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Altres codificacions"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Copia com a HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Copia la selecció com a HTML"

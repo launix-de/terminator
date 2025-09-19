@@ -1848,3 +1848,10 @@ msgstr "Langeto %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Alia kodoprezentoj"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopii kiel HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopii la elektaĵon kiel HTML"

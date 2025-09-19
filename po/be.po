@@ -1799,3 +1799,10 @@ msgstr ""
 
 #~ msgid "Gujarati"
 #~ msgstr "Гуджараці"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Капіяваць як HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Капіяваць вылучанае як HTML"

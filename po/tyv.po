@@ -1751,3 +1751,10 @@ msgstr ""
 
 #~ msgid "South European"
 #~ msgstr "Мурнуу чүк европа"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML дуугаар копияла"
+
+msgid "Copy selection as HTML"
+msgstr "Шагдани HTML дуугаар копияла"

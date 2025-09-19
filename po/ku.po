@@ -1839,3 +1839,10 @@ msgstr ""
 
 #~ msgid "Thai"
 #~ msgstr "Taî"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Wekî HTML kopî bike"
+
+msgid "Copy selection as HTML"
+msgstr "Hilbijartinê wekî HTML kopî bike"

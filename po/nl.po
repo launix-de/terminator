@@ -1882,3 +1882,10 @@ msgstr "Tabblad %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Andere tekensets"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Als HTML kopiëren"
+
+msgid "Copy selection as HTML"
+msgstr "Selectie als HTML kopiëren"

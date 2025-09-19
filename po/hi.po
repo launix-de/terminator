@@ -1758,3 +1758,10 @@ msgstr ""
 
 #~ msgid "South European"
 #~ msgstr "दक्षिण यूरोपीय"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML के रूप में कॉपी करें"
+
+msgid "Copy selection as HTML"
+msgstr "चयन को HTML के रूप में कॉपी करें"

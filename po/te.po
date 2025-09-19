@@ -1845,3 +1845,10 @@ msgstr ""
 
 #~ msgid "Default"
 #~ msgstr "అప్రమేయం"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_HTML గా కాపీ చేయి"
+
+msgid "Copy selection as HTML"
+msgstr "ఎంపికను HTML గా కాపీ చేయి"

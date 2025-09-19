@@ -1862,3 +1862,10 @@ msgstr "Flik %d"
 
 #~ msgid "Other Encodings"
 #~ msgstr "Övriga teckenkodningar"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiera som HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiera markering som HTML"

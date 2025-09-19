@@ -1769,3 +1769,10 @@ msgstr "Grupa prozora %s"
 #, python-format
 msgid "Tab %d"
 msgstr "Kartica %d"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_Kopiraj kao HTML"
+
+msgid "Copy selection as HTML"
+msgstr "Kopiraj odabir kao HTML"

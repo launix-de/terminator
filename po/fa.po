@@ -1850,3 +1850,10 @@ msgstr "زبانه %d"
 
 #~ msgid "User defined"
 #~ msgstr "تعریف‌شده توسط کاربر"
+
+# Added for Copy as HTML feature
+msgid "_Copy as HTML"
+msgstr "_کپی به صورت HTML"
+
+msgid "Copy selection as HTML"
+msgstr "کپی انتخاب به صورت HTML"

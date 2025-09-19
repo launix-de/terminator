@@ -34,4 +34,3 @@ except:
         return(text)
 
     _ = dummytrans
-
