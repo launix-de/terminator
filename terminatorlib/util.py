@@ -28,10 +28,11 @@ import gi
 
 
 try:
-    gi.require_version('Gtk','3.0')
+    # Import Gtk/Gdk without forcing a specific major; respects whichever
+    # version was required earlier (Gtk 4 for the new app).
     from gi.repository import Gtk, Gdk
 except ImportError:
-    print('You need Gtk 3.0+ to run Remotinator.')
+    print('You need GTK with GI bindings to run Terminator.')
     sys.exit(1)
 
 # set this to true to enable debugging output

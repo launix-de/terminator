@@ -79,13 +79,14 @@ class Paned(Container):
     def add(self, widget, metadata=None):
         """Add a widget to the container"""
         if len(self.children) == 0:
-            self.pack1(widget, False, True)
+            # GTK4: set as start child
+            self.set_start_child(widget)
             self.children.append(widget)
         elif len(self.children) == 1:
-            if self.get_child1():
-                self.pack2(widget, False, True)
+            if self.get_start_child():
+                self.set_end_child(widget)
             else:
-                self.pack1(widget, False, True)
+                self.set_start_child(widget)
             self.children.append(widget)
         else:
             raise ValueError('Paned widgets can only have two children')
@@ -245,7 +246,11 @@ class Paned(Container):
 
     def remove(self, widget):
         """Remove a widget from the container"""
-        Gtk.Paned.remove(self, widget)
+        # GTK4: clear appropriate slot
+        if self.get_start_child() is widget:
+            self.set_start_child(None)
+        elif self.get_end_child() is widget:
+            self.set_end_child(None)
         self.disconnect_child(widget)
         self.children.remove(widget)
         return(True)
@@ -253,8 +258,8 @@ class Paned(Container):
     def get_children(self):
         """Return an ordered list of our children"""
         children = []
-        children.append(self.get_child1())
-        children.append(self.get_child2())
+        children.append(self.get_start_child())
+        children.append(self.get_end_child())
         return(children)
 
     def get_child_metadata(self, widget):
@@ -263,13 +268,8 @@ class Paned(Container):
         metadata['had_focus'] = widget.has_focus()
 
     def get_handlesize(self):
-        """Why oh why, gtk3?"""
-        try:
-            value = GObject.Value(int)
-            self.style_get_property('handle-size',  value)
-            return(value.get_int())
-        except:
-            return 0
+        # GTK4: handle-size style property not exposed; approximate to 0
+        return 0
 
     def wrapcloseterm(self, widget):
         """A child terminal has closed, so this container must die"""
@@ -399,22 +399,22 @@ class Paned(Container):
                 pass
             elif child['type'] == 'VPaned':
                 if num == 0:
-                    terminal = self.get_child1()
+                    terminal = self.get_start_child()
                 else:
-                    terminal = self.get_child2()
+                    terminal = self.get_end_child()
                 self.split_axis(terminal, True)
             elif child['type'] == 'HPaned':
                 if num == 0:
-                    terminal = self.get_child1()
+                    terminal = self.get_start_child()
                 else:
-                    terminal = self.get_child2()
+                    terminal = self.get_end_child()
                 self.split_axis(terminal, False)
             else:
                 err('unknown child type: %s' % child['type'])
             num = num + 1
 
-        self.get_child1().create_layout(children[keys[0]])
-        self.get_child2().create_layout(children[keys[1]])
+        self.get_start_child().create_layout(children[keys[0]])
+        self.get_end_child().create_layout(children[keys[1]])
 
         # Set the position with ratio. For some reason more reliable than by pos.
         if 'ratio' in layout:
@@ -423,7 +423,7 @@ class Paned(Container):
 
     def grab_focus(self):
         """We don't want focus, we want a Terminal to have it"""
-        self.get_child1().grab_focus()
+        self.get_start_child().grab_focus()
 
     def rotate_recursive(self, parent, w, h, clockwise, metadata=None):
         """
@@ -509,41 +509,41 @@ class Paned(Container):
             self.ratio = newratio
         self.set_pos(pos)
 
-class HPaned(Paned, Gtk.HPaned):
+class HPaned(Paned, Gtk.Paned):
     """Merge Gtk.HPaned into our base Paned Container"""
     def __init__(self):
         """Class initialiser"""
         Paned.__init__(self)
         GObject.GObject.__init__(self)
+        self.set_orientation(Gtk.Orientation.HORIZONTAL)
         self.props.wide_handle = True
         self.register_signals(HPaned)
         self.cnxids.new(self, 'button-press-event', self.on_button_press)
         self.cnxids.new(self, 'button-release-event', self.on_button_release)
 
     def get_length(self):
-        return(self.get_allocated_width())
+        return self.get_allocated_width()
 
     def set_pos(self, pos):
-        Gtk.HPaned.set_position(self, pos)
-        self.set_property('position-set',  True)
+        self.set_position(pos)
 
-class VPaned(Paned, Gtk.VPaned):
+class VPaned(Paned, Gtk.Paned):
     """Merge Gtk.VPaned into our base Paned Container"""
     def __init__(self):
         """Class initialiser"""
         Paned.__init__(self)
         GObject.GObject.__init__(self)
+        self.set_orientation(Gtk.Orientation.VERTICAL)
         self.props.wide_handle = True
         self.register_signals(VPaned)
         self.cnxids.new(self, 'button-press-event', self.on_button_press)
         self.cnxids.new(self, 'button-release-event', self.on_button_release)
 
     def get_length(self):
-        return(self.get_allocated_height())
+        return self.get_allocated_height()
 
     def set_pos(self, pos):
-        Gtk.VPaned.set_position(self, pos)
-        self.set_property('position-set',  True)
+        self.set_position(pos)
 
 GObject.type_register(HPaned)
 GObject.type_register(VPaned)

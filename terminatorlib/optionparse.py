@@ -19,7 +19,6 @@ import argparse
 import sys
 import os
 
-from terminatorlib.terminator import Terminator
 from .util import dbg, err
 from . import util
 from . import config
@@ -121,11 +120,11 @@ icon for the window (by file or name)'))
         sys.exit(0)
 
     if options.list_profiles:
-        for p in Terminator().config.list_profiles():
+        for p in config.Config().list_profiles():
             print(p)
         sys.exit(0)
     if options.list_layouts:
-        for l in Terminator().config.list_layouts():
+        for l in config.Config().list_layouts():
             print(l)
         sys.exit(0)
 
