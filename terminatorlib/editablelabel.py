@@ -19,7 +19,7 @@
 """ Editable Label class"""
 from gi.repository import GLib, GObject, Gtk, Gdk
 
-class EditableLabel(Gtk.EventBox):
+class EditableLabel(Gtk.Box):
     # pylint: disable-msg=W0212
     # pylint: disable-msg=R0904
     """
@@ -40,14 +40,16 @@ class EditableLabel(Gtk.EventBox):
 
     def __init__(self, text = ""):
         """ Class initialiser"""
-        GObject.GObject.__init__(self) 
+        GObject.GObject.__init__(self)
+        self.set_orientation(Gtk.Orientation.HORIZONTAL)
 
         self._entry_handler_id = []
         self._label = Gtk.Label(label=text, ellipsize='end')
         self._custom = False
-        self.set_visible_window (False)
-        self.add (self._label)  
-        self.connect ("button-press-event", self._on_click_text)
+        self.append(self._label)
+        click = Gtk.GestureClick.new()
+        click.connect("pressed", self._on_click_text)
+        self.add_controller(click)
 
     def set_angle(self, angle ):
         """set angle of the label"""
@@ -71,11 +73,11 @@ class EditableLabel(Gtk.EventBox):
         """ Start editing the widget text """
         if self._entry:
             return False
-        self.remove (self._label)
+        self.remove(self._label)
         self._entry = Gtk.Entry ()
         self._entry.set_text (self._label.get_text ())
         self._entry.show ()
-        self.add (self._entry)
+        self.append(self._entry)
         sig = self._entry.connect ("focus-out-event", self._entry_to_label)
         self._entry_handler_id.append(sig)
         sig = self._entry.connect ("activate", self._on_entry_activated)
@@ -88,12 +90,10 @@ class EditableLabel(Gtk.EventBox):
         self._entry_handler_id.append(sig)
         self._entry.grab_focus ()
 
-    def _on_click_text(self, widget, event):
+    def _on_click_text(self, gesture, n_press, x, y):
         # pylint: disable-msg=W0613
         """event handling text edition"""
-        if event.button != 1:
-            return False
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
+        if n_press == 2:
             self.edit()
             return(True)
         return(False)
@@ -107,8 +107,8 @@ class EditableLabel(Gtk.EventBox):
                 if self._entry.handler_is_connected(sig):
                     self._entry.disconnect(sig)
             self._entry_handler_id = []
-            self.remove (self._entry)
-            self.add (self._label)
+            self.remove(self._entry)
+            self.append(self._label)
             self._entry = None
             self.show_all ()
             self.emit('edit-done')
@@ -146,8 +146,8 @@ class EditableLabel(Gtk.EventBox):
             return True
 
     def modify_fg(self, state, color):
-        """Set the label foreground"""
-        self._label.modify_fg(state, color)
+        # GTK4: deprecated; left as no-op for compatibility
+        pass
 
     def is_custom(self):
         """Return whether or not we have a custom string set"""
@@ -158,7 +158,7 @@ class EditableLabel(Gtk.EventBox):
         self._custom = True
 
     def modify_font(self, fontdesc):
-        """Set the label font using a pango.FontDescription"""
-        self._label.modify_font(fontdesc)
+        # GTK4: deprecated; left as no-op for compatibility
+        pass
 
 GObject.type_register(EditableLabel)

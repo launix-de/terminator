@@ -121,13 +121,19 @@ class Window(Container, Gtk.Window):
 
     def register_callbacks(self):
         """Connect the GTK+ signals we care about"""
-        self.connect('key-press-event', self.on_key_press)
-        self.connect('button-press-event', self.on_button_press)
-        self.connect('delete_event', self.on_delete_event)
+        # GTK4: controllers and updated signals
+        key = Gtk.EventControllerKey()
+        key.connect('key-pressed', self.on_key_press)
+        self.add_controller(key)
+
+        click = Gtk.GestureClick.new()
+        click.connect('pressed', self.on_button_press)
+        self.add_controller(click)
+
+        self.connect('close-request', self.on_close_request)
         self.connect('destroy', self.on_destroy_event)
-        self.connect('window-state-event', self.on_window_state_changed)
-        self.connect('focus-out-event', self.on_focus_out)
-        self.connect('focus-in-event', self.on_focus_in)
+        # Track focus changes via is-active
+        self.connect('notify::is-active', self._on_active_notify)
 
         # Attempt to grab a global hotkey for hiding the window.
         # If we fail, we'll never hide the window, iconifying instead.
@@ -175,7 +181,7 @@ class Window(Container, Gtk.Window):
         self.set_sticky(sticky)
         if self.hidebound:
             self.set_hidden(hidden)
-            self.set_skip_taskbar_hint(skiptaskbar)
+            # GTK4: skip-taskbar hint not available; ignore
         else:
             self.set_iconified(hidden)
 
@@ -201,37 +207,37 @@ class Window(Container, Gtk.Window):
             else:
                 dbg('Unable to load %s icon' % (icon_name))
 
-        icon = self.render_icon(Gtk.STOCK_DIALOG_INFO, Gtk.IconSize.BUTTON)
-        self.set_icon(icon)
+        # GTK4: rely on theme; skip render_icon fallback
 
-    def on_key_press(self, window, event):
+    def on_key_press(self, controller, keyval, keycode, state):
         """Handle a keyboard event"""
-        maker = Factory()
-
         self.set_urgency_hint(False)
+        fs = self.config['keybindings'].get('full_screen')
+        cw = self.config['keybindings'].get('close_window')
+        def matches(binding):
+            if not binding:
+                return False
+            kv, mods = Gtk.accelerator_parse(binding)
+            if kv == 0:
+                return False
+            smods = Gdk.ModifierType(state) & ~Gdk.ModifierType.LOCK_MASK
+            return keyval == kv and smods == mods
+        if matches(fs):
+            self.set_fullscreen(not getattr(self, 'isfullscreen', False))
+            return True
+        if matches(cw):
+            if not self.on_delete_event(self, None):
+                self.on_destroy_event(self)
+            return True
+        return False
 
-        mapping = self.terminator.keybindings.lookup(event)
-
-        if mapping:
-            dbg('looked up %r' % mapping)
-            if mapping == 'full_screen':
-                self.set_fullscreen(not self.isfullscreen)
-            elif mapping == 'close_window':
-                if not self.on_delete_event(window,
-                        Gdk.Event.new(Gdk.EventType.DELETE)):
-                    self.on_destroy_event(window,
-                            Gdk.Event.new(Gdk.EventType.DESTROY))
-            else:
-                return(False)
-            return(True)
-
-    def on_button_press(self, window, event):
+    def on_button_press(self, gesture, n_press, x, y):
         """Handle a mouse button event. Mainly this is just a clean way to
         cancel any urgency hints that are set."""
         self.set_urgency_hint(False)
-        return(False)
+        return False
 
-    def on_focus_out(self, window, event):
+    def on_focus_out(self, window=None, event=None):
         """Focus has left the window"""
         for terminal in self.get_visible_terminals():
             terminal.on_window_focus_out()
@@ -245,7 +251,7 @@ class Window(Container, Gtk.Window):
                 self.position = self.get_position()
                 self.hidefunc()
 
-    def on_focus_in(self, window, event):
+    def on_focus_in(self, window=None, event=None):
         """Focus has entered the window"""
         self.set_urgency_hint(False)
         if not self.terminator.doing_layout:
@@ -372,7 +378,10 @@ class Window(Container, Gtk.Window):
     def set_iconified(self, value):
         """Set the minimised state of the window from the supplied value"""
         if value == True:
-            self.iconify()
+            try:
+                self.minimize()
+            except Exception:
+                self.hide()
 
     def set_always_on_top(self, value):
         """Set the always on top window hint from the supplied value"""
@@ -412,7 +421,7 @@ class Window(Container, Gtk.Window):
     def add(self, widget, metadata=None):
         """Add a widget to the window by way of Gtk.Window.add()"""
         maker = Factory()
-        Gtk.Window.add(self, widget)
+        self.set_child(widget)
         if maker.isinstance(widget, 'Terminal'):
             signals = {'close-term': self.closeterm,
                        'title-change': self.title.set_title,
@@ -449,7 +458,8 @@ class Window(Container, Gtk.Window):
 
     def remove(self, widget):
         """Remove our child widget by way of Gtk.Window.remove()"""
-        Gtk.Window.remove(self, widget)
+        if self.get_child() is widget:
+            self.set_child(None)
         self.disconnect_child(widget)
         return(True)
 
@@ -1042,3 +1052,11 @@ class WindowTitle(object):
         self.window.set_title(title)
 
 # vim: set expandtab ts=4 sw=4:
+    def _on_active_notify(self, *args):
+        if self.is_active():
+            self.on_focus_in()
+        else:
+            self.on_focus_out()
+
+    def on_close_request(self, *args):
+        return self.on_delete_event(self, None)

@@ -187,40 +187,47 @@ the tab will also close all terminals within it.')
             description_text = ''
 
         # dialog GUI
-        dialog = Gtk.Dialog(_('Close?'), window, Gtk.DialogFlags.MODAL)
+        dialog = Gtk.Dialog(title=_('Close?'), transient_for=window, modal=True)
         dialog.set_resizable(False)
-    
-        dialog.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.REJECT)
-        c_all = dialog.add_button(Gtk.STOCK_CLOSE, Gtk.ResponseType.ACCEPT)
-        c_all.get_children()[0].get_children()[0].get_children()[1].set_label(
-                confirm_button_text)
-    
-        primary = Gtk.Label(label=_('<big><b>' + big_label_text + '</b></big>'))
-        primary.set_use_markup(True)
-        primary.set_alignment(0, 0.5)
+        content = dialog.get_content_area()
+
+        cancel = dialog.add_button(_('Cancel'), Gtk.ResponseType.REJECT)
+        ok = dialog.add_button(_('Close'), Gtk.ResponseType.ACCEPT)
+
+        primary = Gtk.Label()
+        primary.set_markup('<big><b>%s</b></big>' % big_label_text)
+        primary.set_xalign(0)
 
         secondary = Gtk.Label(label=description_text)
-        secondary.set_line_wrap(True)
-                    
-        labels = Gtk.VBox()
-        labels.pack_start(primary, False, False, 6)
-        labels.pack_start(secondary, False, False, 6)
-    
-        image = Gtk.Image.new_from_stock(Gtk.STOCK_DIALOG_WARNING,
-                                         Gtk.IconSize.DIALOG)
-        image.set_alignment(0.5, 0)
-    
-        box = Gtk.HBox()
-        box.pack_start(image, False, False, 6)
-        box.pack_start(labels, False, False, 6)
-        dialog.vbox.pack_start(box, False, False, 12)
+        secondary.set_wrap(True)
+        secondary.set_xalign(0)
 
-        checkbox = Gtk.CheckButton(_("Do not show this message next time"))
-        dialog.vbox.pack_end(checkbox, True, True, 0)
-    
-        dialog.show_all()
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        labels.append(primary)
+        labels.append(secondary)
 
-        result = dialog.run()
+        image = Gtk.Image.new_from_icon_name('dialog-warning')
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.append(image)
+        box.append(labels)
+        content.append(box)
+
+        checkbox = Gtk.CheckButton(label=_("Do not show this message next time"))
+        content.append(checkbox)
+
+        dialog.show()
+
+        result_holder = {'result': Gtk.ResponseType.REJECT}
+
+        def on_response(dlg, resp):
+            result_holder['result'] = resp
+        dialog.connect('response', on_response)
+        # Present and wait for response handled by the main loop
+        while result_holder['result'] not in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+        result = result_holder['result']
         
         # set configuration
         self.config.base.reload()

@@ -36,15 +36,19 @@ class Notebook(Container, Gtk.Notebook):
         GObject.type_register(Notebook)
         self.register_signals(Notebook)
         self.connect('switch-page', self.deferred_on_tab_switch)
-        self.connect('scroll-event', self.on_scroll_event)
+        # GTK4: use EventControllerScroll for scrolling through tabs
+        scroll = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
+        scroll.connect('scroll', self._on_scroll_controller)
+        self.add_controller(scroll)
         self.connect('create-window', self.create_window_detach)
         self.configure()
 
         self.set_can_focus(False)
 
         child = window.get_child()
-        window.remove(child)
-        window.add(self)
+        if child is not None:
+            window.set_child(None)
+        window.set_child(self)
         window_last_active_term = window.last_active_term
         self.newtab(widget=child)
         if window_last_active_term:
@@ -192,8 +196,7 @@ class Notebook(Container, Gtk.Notebook):
 
         self.insert_page(container, None, page_num)
         self.set_tab_detachable(container, self.config['detachable_tabs'])
-        self.child_set_property(container, 'tab-expand', True)
-        self.child_set_property(container, 'tab-fill', True)
+        # child properties not used in GTK4; notebook fills tabs by default
         self.set_tab_reorderable(container, True)
         self.set_tab_label(container, label)
         self.show_all()
@@ -336,8 +339,7 @@ class Notebook(Container, Gtk.Notebook):
                 break
 
         self.set_tab_label(widget, label)
-        self.child_set_property(widget, 'tab-expand', True)
-        self.child_set_property(widget, 'tab-fill', True)
+        # child properties not used in GTK4
 
         self.set_tab_reorderable(widget, True)
         self.set_current_page(tabpos)
@@ -524,56 +526,23 @@ class Notebook(Container, Gtk.Notebook):
                 GObject.idle_add(term.ensure_visible_and_focussed)
         return True
 
-    def on_scroll_event(self, notebook, event):
-        '''Handle scroll events for scrolling through tabs'''
-        #print "self: %s" % self
-        #print "event: %s" % event
+    def _on_scroll_controller(self, dx, dy):
         child = self.get_nth_page(self.get_current_page())
-        if child == None:
-            print("Child = None,  return false")
+        if child is None:
             return False
-
-        event_widget = Gtk.get_event_widget(event)
-
-        if event_widget == None or \
-           event_widget == child or \
-           event_widget.is_ancestor(child):
-            print("event_widget is wrong one,  return false")
-            return False
-
-        # Not sure if we need these. I don't think wehave any action widgets
-        # at this point.
-        action_widget = self.get_action_widget(Gtk.PackType.START)
-        if event_widget == action_widget or \
-           (action_widget != None and event_widget.is_ancestor(action_widget)):
-            return False
-        action_widget = self.get_action_widget(Gtk.PackType.END)
-        if event_widget == action_widget or \
-           (action_widget != None and event_widget.is_ancestor(action_widget)):
-            return False
-
-        if event.direction in [Gdk.ScrollDirection.RIGHT,
-                               Gdk.ScrollDirection.DOWN]:
-            self.next_page()
-        elif event.direction in [Gdk.ScrollDirection.LEFT,
-                                 Gdk.ScrollDirection.UP]:
-            self.prev_page()
-        elif event.direction == Gdk.ScrollDirection.SMOOTH:
-            if self.get_tab_pos() in [Gtk.PositionType.LEFT,
-                                      Gtk.PositionType.RIGHT]:
-                if event.delta_y > 0:
-                    self.next_page()
-                elif event.delta_y < 0:
-                    self.prev_page()
-            elif self.get_tab_pos() in [Gtk.PositionType.TOP,
-                                        Gtk.PositionType.BOTTOM]:
-                if event.delta_x > 0:
-                    self.next_page()
-                elif event.delta_x < 0:
-                    self.prev_page()
+        if self.get_tab_pos() in [Gtk.PositionType.LEFT, Gtk.PositionType.RIGHT]:
+            if dy > 0:
+                self.next_page()
+            elif dy < 0:
+                self.prev_page()
+        else:
+            if dx > 0:
+                self.next_page()
+            elif dx < 0:
+                self.prev_page()
         return True
 
-class TabLabel(Gtk.HBox):
+class TabLabel(Gtk.Box):
     """Class implementing a label widget for Notebook tabs"""
     notebook = None
     terminator = None
@@ -590,17 +559,21 @@ class TabLabel(Gtk.HBox):
     def __init__(self, title, notebook):
         """Class initialiser"""
         GObject.GObject.__init__(self)
+        self.set_orientation(Gtk.Orientation.HORIZONTAL)
 
         self.notebook = notebook
         self.terminator = Terminator()
         self.config = Config()
 
-        self.connect("button-press-event", self.on_button_pressed)
+        click = Gtk.GestureClick.new()
+        click.set_button(2)
+        click.connect('pressed', self.on_button_pressed)
+        self.add_controller(click)
 
         self.label = EditableLabel(title)
         self.update_angle()
 
-        self.pack_start(self.label, True, True, 0)
+        self.append(self.label)
 
         self.update_button()
         self.show_all()
@@ -651,12 +624,12 @@ class TabLabel(Gtk.HBox):
 #        style.xthickness = 0
 #        style.ythickness = 0
 #        self.button.modify_style(style)
-        self.button.add(self.icon)
+        self.button.set_child(self.icon)
         self.button.connect('clicked', self.on_close)
         self.button.set_name('terminator-tab-close-button')
         if hasattr(self.button, 'set_tooltip_text'):
             self.button.set_tooltip_text(_('Close Tab'))
-        self.pack_start(self.button, False, False, 0)
+        self.append(self.button)
         self.show_all()
 
     def update_angle(self):
@@ -679,8 +652,7 @@ class TabLabel(Gtk.HBox):
         """The close button has been clicked. Destroy the tab"""
         self.emit('close-clicked', self)
 
-    def on_button_pressed(self, _widget, event):
-        if event.button == 2:
-            self.on_close(_widget)
+    def on_button_pressed(self, gesture, n_press, x, y):
+        self.on_close(self)
 
 # vim: set expandtab ts=4 sw=4:

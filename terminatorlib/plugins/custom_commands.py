@@ -261,6 +261,19 @@ class CustomCommandsMenu(plugin.MenuItem):
       return self.store
 
     def configure(self, widget, data = None):
+      # GTK4 path: use ported dialog
+      try:
+        from gi.repository import Gtk as _Gtk
+        if hasattr(_Gtk, 'GestureClick') and hasattr(_Gtk, 'Dialog'):  # crude GTK4 check
+          try:
+            from terminatorlib.plugin_dialogs_gtk4 import show_custom_commands_dialog
+            show_custom_commands_dialog(self, widget)
+            return
+          except Exception:
+            pass
+      except Exception:
+        pass
+      # GTK3 legacy dialog follows
       ui = {}
       dbox = Gtk.Dialog(
                       _("Custom Commands Configuration"),
@@ -653,4 +666,3 @@ if __name__ == '__main__':
   c = CustomCommandsMenu()
   c.configure(None, None)
   Gtk.main()
-

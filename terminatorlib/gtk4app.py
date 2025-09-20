@@ -8,7 +8,9 @@ import os
 import shlex
 import shutil
 from typing import List, Optional
-
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, GLib, Gio
 from .config import Config
 

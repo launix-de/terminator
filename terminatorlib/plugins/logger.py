@@ -6,7 +6,15 @@ terminals """
 
 import os
 import sys
-from gi.repository import Gtk,Vte
+import gi
+try:
+    gi.require_version('Vte', '3.91')
+except Exception:
+    try:
+        gi.require_version('Vte', '2.91')
+    except Exception:
+        pass
+from gi.repository import Gtk, Vte
 import terminatorlib.plugin as plugin
 from terminatorlib.translation import _
 
@@ -66,38 +74,61 @@ class Logger(plugin.MenuItem):
         
     def start_logger(self, _widget, Terminal):
         """ Handle menu item callback by saving text to a file"""
-        savedialog = Gtk.FileChooserDialog(title=_("Save Log File As"),
-                                           action=self.dialog_action,
-                                           buttons=self.dialog_buttons)
-        savedialog.set_transient_for(_widget.get_toplevel())
-        savedialog.set_do_overwrite_confirmation(True)
-        savedialog.set_local_only(True)
-        savedialog.show_all()
-        response = savedialog.run()
-        if response == Gtk.ResponseType.OK:
-            try:
+        logfile = None
+        # Prefer GTK4 FileDialog if available
+        try:
+            if hasattr(Gtk, 'FileDialog'):
+                from gi.repository import GLib
+                file_dialog = Gtk.FileDialog(title=_("Save Log File As"))
+                result = {'path': None}
+                def on_done(dlg, res):
+                    try:
+                        gfile = dlg.save_finish(res)
+                        if gfile is not None:
+                            result['path'] = gfile.get_path()
+                    except Exception:
+                        result['path'] = None
+                loop = GLib.MainLoop()
+                def _cb(dlg, res):
+                    on_done(dlg, res)
+                    try:
+                        loop.quit()
+                    except Exception:
+                        pass
+                file_dialog.save(_widget.get_toplevel(), None, _cb)
+                loop.run()
+                logfile = result['path']
+            else:
+                raise AttributeError
+        except Exception:
+            savedialog = Gtk.FileChooserDialog(title=_("Save Log File As"),
+                                               action=self.dialog_action,
+                                               buttons=self.dialog_buttons)
+            savedialog.set_transient_for(_widget.get_toplevel())
+            savedialog.set_do_overwrite_confirmation(True)
+            savedialog.set_local_only(True)
+            savedialog.show_all()
+            response = savedialog.run()
+            if response == Gtk.ResponseType.OK:
                 logfile = os.path.join(savedialog.get_current_folder(),
                                        savedialog.get_filename())
+            savedialog.destroy()
+
+        if logfile:
+            try:
                 fd = open(logfile, 'w+')
-                # Save log file path, 
-                # associated file descriptor, signal handler id
-                # and last saved col,row positions respectively.
                 vte_terminal = Terminal.get_vte()
                 (col, row) = vte_terminal.get_cursor_position()
-
                 self.loggers[vte_terminal] = {"filepath":logfile,
                                               "handler_id":0, "fd":fd,
                                               "col":col, "row":row}
-                # Add contents-changed callback
                 self.loggers[vte_terminal]["handler_id"] = vte_terminal.connect('contents-changed', self.save)
-            except:
-                e = sys.exc_info()[1]
+            except Exception as e:
                 error = Gtk.MessageDialog(None, Gtk.DialogFlags.MODAL, Gtk.MessageType.ERROR,
-                                          Gtk.ButtonsType.OK, e.strerror)
-                error.set_transient_for(savedialog)
+                                          Gtk.ButtonsType.OK, str(e))
+                error.set_transient_for(_widget.get_toplevel())
                 error.run()
                 error.destroy()
-        savedialog.destroy()
 
     def stop_logger(self, _widget, terminal):
         vte_terminal = terminal.get_vte()

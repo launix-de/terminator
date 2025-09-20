@@ -7,7 +7,13 @@ is copied to clipboard.
 """
 
 import gi
-gi.require_version('Vte', '2.91')  # vte-0.38 (gnome-3.14)
+try:
+    gi.require_version('Vte', '3.91')
+except Exception:
+    try:
+        gi.require_version('Vte', '2.91')
+    except Exception:
+        pass
 from gi.repository import Vte
 
 from terminatorlib.terminator import Terminator

@@ -4,8 +4,9 @@
 terminals"""
 
 import os
+import gi
 from gi.repository import Gtk
-from gi.repository import GdkPixbuf
+from gi.repository import GdkPixbuf, GLib
 import terminatorlib.plugin as plugin
 from terminatorlib.translation import _
 from terminatorlib.util import widget_pixbuf
@@ -31,28 +32,83 @@ class TerminalShot(plugin.MenuItem):
 
     def terminalshot(self, _widget, terminal):
         """Handle the taking, prompting and saving of a terminalshot"""
-        # Grab a pixbuf of the terminal
-        orig_pixbuf = widget_pixbuf(terminal)
+        # Grab a pixbuf of the terminal (GTK3 util); GTK4 may not support this path
+        try:
+            orig_pixbuf = widget_pixbuf(terminal)
+        except Exception as e:
+            errdlg = Gtk.MessageDialog(transient_for=(terminal.get_root() if hasattr(terminal, 'get_root') else None),
+                                       modal=True,
+                                       message_type=Gtk.MessageType.ERROR,
+                                       buttons=Gtk.ButtonsType.OK,
+                                       text=_('Terminal screenshot is not available on this backend.'))
+            errdlg.format_secondary_text(str(e))
+            errdlg.connect('response', lambda d, r: d.destroy())
+            errdlg.present()
+            return
 
-        savedialog = Gtk.FileChooserDialog(title=_("Save image"),
-                                           action=self.dialog_action,
-                                           buttons=self.dialog_buttons)
-        savedialog.set_transient_for(_widget.get_toplevel())
-        savedialog.set_do_overwrite_confirmation(True)
-        savedialog.set_local_only(True)
-
-        pixbuf = orig_pixbuf.scale_simple(orig_pixbuf.get_width() / 2, 
-                                     orig_pixbuf.get_height() / 2,
-                                     GdkPixbuf.InterpType.BILINEAR)
-        image = Gtk.Image.new_from_pixbuf(pixbuf)
-        savedialog.set_preview_widget(image)
-
-        savedialog.show_all()
-        response = savedialog.run()
         path = None
-        if response == Gtk.ResponseType.OK:
-            path = os.path.join(savedialog.get_current_folder(),
-                                savedialog.get_filename())
-            orig_pixbuf.savev(path, 'png', [], [])
+        # Prefer GTK4 FileDialog if available
+        try:
+            if hasattr(Gtk, 'FileDialog'):
+                file_dialog = Gtk.FileDialog(title=_("Save image"))
+                result = {'path': None}
+                loop = GLib.MainLoop()
+                def on_done(dlg, res):
+                    try:
+                        gfile = dlg.save_finish(res)
+                        if gfile is not None:
+                            result['path'] = gfile.get_path()
+                    except Exception:
+                        result['path'] = None
+                    try:
+                        loop.quit()
+                    except Exception:
+                        pass
+                parent = terminal.get_root() if hasattr(terminal, 'get_root') else None
+                file_dialog.save(parent, None, on_done)
+                loop.run()
+                path = result['path']
+            else:
+                raise AttributeError
+        except Exception:
+            savedialog = Gtk.FileChooserDialog(title=_("Save image"),
+                                               action=self.dialog_action,
+                                               buttons=self.dialog_buttons)
+            try:
+                if _widget is not None:
+                    savedialog.set_transient_for(_widget.get_toplevel())
+            except Exception:
+                pass
+            savedialog.set_do_overwrite_confirmation(True)
+            savedialog.set_local_only(True)
+            try:
+                # Show a small preview
+                pixbuf = orig_pixbuf.scale_simple(max(1, orig_pixbuf.get_width() // 2),
+                                                  max(1, orig_pixbuf.get_height() // 2),
+                                                  GdkPixbuf.InterpType.BILINEAR)
+                image = Gtk.Image.new_from_pixbuf(pixbuf)
+                savedialog.set_preview_widget(image)
+            except Exception:
+                pass
+            savedialog.show_all()
+            response = savedialog.run()
+            if response == Gtk.ResponseType.OK:
+                path = os.path.join(savedialog.get_current_folder(),
+                                    savedialog.get_filename())
+            savedialog.destroy()
 
-        savedialog.destroy()
+        if path:
+            try:
+                # Ensure .png extension
+                if not path.lower().endswith('.png'):
+                    path += '.png'
+                orig_pixbuf.savev(path, 'png', [], [])
+            except Exception as e:
+                errdlg = Gtk.MessageDialog(transient_for=(terminal.get_root() if hasattr(terminal, 'get_root') else None),
+                                           modal=True,
+                                           message_type=Gtk.MessageType.ERROR,
+                                           buttons=Gtk.ButtonsType.OK,
+                                           text=_('Failed to save image'))
+                errdlg.format_secondary_text(str(e))
+                errdlg.connect('response', lambda d, r: d.destroy())
+                errdlg.present()

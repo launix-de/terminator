@@ -2,9 +2,7 @@
 # GPL v2 only
 """titlebar.py - classes necessary to provide a terminal title bar"""
 
-from gi.repository import Gtk, Gdk
-from gi.repository import GObject
-from gi.repository import Pango
+from gi.repository import Gtk, Gdk, GObject, Pango
 
 from .version import APP_NAME
 from .util import dbg
@@ -14,7 +12,7 @@ from .translation import _
 
 # pylint: disable-msg=R0904
 # pylint: disable-msg=W0613
-class Titlebar(Gtk.EventBox):
+class Titlebar(Gtk.Box):
     """Class implementing the Titlebar widget"""
 
     terminator = None
@@ -45,10 +43,11 @@ class Titlebar(Gtk.EventBox):
         self.terminal = terminal
         self.config = self.terminal.config
 
+        self.set_orientation(Gtk.Orientation.HORIZONTAL)
         self.label = EditableLabel()
         self.label.connect('edit-done', self.on_edit_done)
-        self.ebox = Gtk.EventBox()
-        grouphbox = Gtk.HBox()
+        self.ebox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        grouphbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.grouplabel = Gtk.Label(ellipsize='end')
         self.groupicon = Gtk.Image()
         self.bellicon = Gtk.Image()
@@ -74,26 +73,26 @@ class Titlebar(Gtk.EventBox):
         grouphbox.pack_start(self.grouplabel, False, True, 2)
         grouphbox.pack_start(self.groupentry, False, True, 2)
 
-        self.ebox.add(grouphbox)
-        self.ebox.show_all()
+        self.ebox.append(grouphbox)
+        self.ebox.show()
 
         self.bellicon.set_from_icon_name('terminal-bell', Gtk.IconSize.MENU)
 
-        viewport = Gtk.Viewport(hscroll_policy='natural')
-        viewport.add(self.label)
+        viewport = Gtk.ScrolledWindow()
+        viewport.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
+        viewport.set_child(self.label)
 
-        hbox = Gtk.HBox()
-        hbox.pack_start(self.ebox, False, True, 0)
-        hbox.pack_start(Gtk.VSeparator(), False, True, 0)
-        hbox.pack_start(viewport, True, True, 0)
-        hbox.pack_end(self.bellicon, False, False, 2)
-
-        self.add(hbox)
-        hbox.show_all()
+        self.append(self.ebox)
+        self.append(viewport)
+        self.append(self.bellicon)
+        self.show()
         self.set_no_show_all(True)
         self.show()
 
-        self.connect('button-press-event', self.on_clicked)
+        # Use a click controller instead of button-press-event
+        click = Gtk.GestureClick.new()
+        click.connect('pressed', lambda *a: self.on_clicked(self, None))
+        self.add_controller(click)
 
     def connect_icon(self, func):
         """Connect the supplied function to clicking on the group icon"""
@@ -116,8 +115,8 @@ class Titlebar(Gtk.EventBox):
             title_font = Pango.FontDescription(self.config['title_font'])
         else:
             title_font = Pango.FontDescription(self.config.get_system_prop_font())
-        self.label.modify_font(title_font)
-        self.grouplabel.modify_font(title_font)
+            self.label.modify_font(title_font)
+            self.grouplabel.modify_font(title_font)
 
         if other:
             term = self.terminal
@@ -166,20 +165,14 @@ class Titlebar(Gtk.EventBox):
                 group_fg = self.config['title_transmit_fg_color']
                 group_bg = self.config['title_transmit_bg_color']
 
-            self.label.modify_fg(Gtk.StateType.NORMAL,
-                    Gdk.color_parse(title_fg))
-            self.grouplabel.modify_fg(Gtk.StateType.NORMAL,
-                    Gdk.color_parse(group_fg))
-            self.modify_bg(Gtk.StateType.NORMAL, 
-                    Gdk.color_parse(title_bg))
+            # GTK4: CSS styling only; skip direct color modifications
             if not self.get_desired_visibility():
                 if default_bg == True:
                     color = term.get_style_context().get_background_color(Gtk.StateType.NORMAL)  # VERIFY FOR GTK3
                 else:
                     color = Gdk.color_parse(title_bg)
             self.update_visibility()
-            self.ebox.modify_bg(Gtk.StateType.NORMAL,
-                    Gdk.color_parse(group_bg))
+            # GTK4: CSS styling only; skip direct color modifications
             self.set_from_icon_name(icon, Gtk.IconSize.MENU)
 
     def update_visibility(self):

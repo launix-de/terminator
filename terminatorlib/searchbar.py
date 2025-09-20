@@ -2,12 +2,7 @@
 # GPL v2 only
 """searchbar.py - classes necessary to provide a terminal search bar"""
 
-import gi
-from gi.repository import Gtk, Gdk
-gi.require_version('Vte', '2.91')  # vte-0.38 (gnome-3.14)
-from gi.repository import Vte
-from gi.repository import GObject
-from gi.repository import GLib
+from gi.repository import Gtk, Gdk, Vte, GObject, GLib
 
 from .translation import _
 from .config import Config
@@ -15,7 +10,7 @@ from . import regex
 from .util import dbg
 
 # pylint: disable-msg=R0904
-class Searchbar(Gtk.HBox):
+class Searchbar(Gtk.Box):
     """Class implementing the Searchbar widget"""
 
     __gsignals__ = {
@@ -48,13 +43,17 @@ class Searchbar(Gtk.HBox):
             self.regex_flags_glib |= regex.GLIB_CASELESS
 
         self.get_style_context().add_class("terminator-terminal-searchbar")
+        self.set_orientation(Gtk.Orientation.HORIZONTAL)
 
         # Search text
         self.entry = Gtk.Entry()
         self.entry.set_activates_default(True)
         self.entry.show()
         self.entry.connect('activate', self.do_search)
-        self.entry.connect('key-press-event', self.search_keypress)
+        # Key handling via controller
+        keyctrl = Gtk.EventControllerKey()
+        keyctrl.connect('key-pressed', self.search_keypress)
+        self.add_controller(keyctrl)
 
         # Label
         label = Gtk.Label(label=_('Search:'))
@@ -66,9 +65,8 @@ class Searchbar(Gtk.HBox):
         close = Gtk.Button()
         close.set_relief(Gtk.ReliefStyle.NONE)
         close.set_focus_on_click(False)
-        icon = Gtk.Image()
-        icon.set_from_stock(Gtk.STOCK_CLOSE, Gtk.IconSize.MENU)
-        close.add(icon)
+        icon = Gtk.Image.new_from_icon_name('window-close-symbolic')
+        close.set_child(icon)
         close.set_name('terminator-search-close-button')
         if hasattr(close, 'set_tooltip_text'):
             close.set_tooltip_text(_('Close Search bar'))
@@ -108,14 +106,14 @@ class Searchbar(Gtk.HBox):
         self.invert_search.set_active(self.search_is_inverted)
         self.invert_search.connect('toggled', self.wrap_invert_search)
 
-        self.pack_start(label, False, True, 0)
-        self.pack_start(self.entry, True, True, 0)
-        self.pack_start(self.prev, False, False, 0)
-        self.pack_start(self.next, False, False, 0)
-        self.pack_start(self.wrap, False, False, 0)
-        self.pack_start(self.match_case, False, False, 0)
-        self.pack_start(self.invert_search, False, False, 0)
-        self.pack_end(close, False, False, 0)
+        self.append(label)
+        self.append(self.entry)
+        self.append(self.prev)
+        self.append(self.next)
+        self.append(self.wrap)
+        self.append(self.match_case)
+        self.append(self.invert_search)
+        self.append(close)
 
         self.hide()
         self.set_no_show_all(True)
@@ -165,18 +163,18 @@ class Searchbar(Gtk.HBox):
             self.vte.search_set_wrap_around(True)
 
     # pylint: disable-msg=W0613
-    def search_keypress(self, widget, event):
+    def search_keypress(self, controller, keyval, keycode, state):
         """Handle keypress events"""
-        key = Gdk.keyval_name(event.keyval)
+        key = Gdk.keyval_name(keyval)
         if key == 'Escape':
             self.end_search()
-        elif (event.state & Gdk.ModifierType.SHIFT_MASK)\
-                and (event.keyval == Gdk.KEY_Return or event.keyval == Gdk.KEY_KP_Enter):
+        elif (state & Gdk.ModifierType.SHIFT_MASK) and (keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter)):
             if self.search_is_inverted:
                 self.next_search(None)
             else:
                 self.prev_search(None)
             return True
+        return False
 
     def start_search(self):
         """Show ourselves"""

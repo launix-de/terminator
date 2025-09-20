@@ -579,17 +579,47 @@ class Remote(MenuItem):
         menuitems.append(item)
 
         # add option to clone on split
-        item = Gtk.CheckMenuItem(_('Clone On Split'))
-        item.set_active(self.config['auto_clone'])
-        item.connect(
-            'toggled',
-            self._on_clone_on_split,
-            None
-        )
-        menuitems.append(item)
+        try:
+            item = Gtk.CheckMenuItem(_('Clone On Split'))
+            item.set_active(self.config['auto_clone'])
+            item.connect(
+                'toggled',
+                self._on_clone_on_split,
+                None
+            )
+            menuitems.append(item)
+        except Exception:
+            pass
+
+        # preferences entry under plugin section (GTK3/GTK4 compatible)
+        try:
+            pref = Gtk.MenuItem.new_with_mnemonic(_('_Preferences'))
+            def on_prefs(_w):
+                try:
+                    # Use GTK4 dialog if available
+                    from gi.repository import Gtk as _Gtk
+                    if hasattr(_Gtk, 'PopoverMenu'):
+                        from terminatorlib.plugin_dialogs_gtk4 import show_remote_prefs_dialog
+                        show_remote_prefs_dialog(self, terminal)
+                        return
+                except Exception:
+                    pass
+                # Legacy path could be added here if needed
+            pref.connect('activate', on_prefs)
+            menuitems.append(pref)
+        except Exception:
+            pass
 
         # find the split items and add our clone handlers when they finish
-        if self.config['auto_clone']:
+        # GTK3 path only; under GTK4 (PopoverMenu/Gio.MenuModel) there are no
+        # child Gtk.MenuItems to hook. We rely on our explicit Clone actions
+        # above to perform split + clone.
+        try:
+            from gi.repository import Gtk as _Gtk
+            is_gtk4 = hasattr(_Gtk, 'PopoverMenu') and hasattr(_Gtk, 'ShortcutController')
+        except Exception:
+            is_gtk4 = False
+        if self.config['auto_clone'] and not is_gtk4:
             self.peers = self._get_all_terminals()
             for child in menu.get_children():
                 if 'Split' in child.get_label():
@@ -751,7 +781,26 @@ class Remote(MenuItem):
                 time.time()
             )
             self._apply_host_settings(terminal)
-            # launch new terminal
-            terminal.emit(signal, terminal.get_cwd())
+            # launch new terminal (GTK4: call window split directly)
+            try:
+                from gi.repository import Gtk as _Gtk
+                is_gtk4 = hasattr(_Gtk, 'PopoverMenu') and hasattr(_Gtk, 'ShortcutController')
+            except Exception:
+                is_gtk4 = False
+            if is_gtk4:
+                try:
+                    win = terminal.get_root()
+                    if signal == 'split-horiz':
+                        win._on_split(_Gtk.Orientation.HORIZONTAL)
+                    elif signal == 'split-vert':
+                        win._on_split(_Gtk.Orientation.VERTICAL)
+                    else:
+                        # split-auto
+                        win._on_split_auto()
+                except Exception as e:
+                    err(f"remote: GTK4 split failed: {e}")
+            else:
+                # GTK3 legacy: emit original signal on terminal
+                terminal.emit(signal, terminal.get_cwd())
         else:
             err("already waiting for a terminal?")

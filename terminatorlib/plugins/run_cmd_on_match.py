@@ -191,6 +191,18 @@ class RunCmdOnMatchMenu(plugin.MenuItem):
         terminal.vte.feed_child(command.encode())
 
     def configure(self, widget, data = None):
+      # GTK4 path: use ported dialog if available
+      try:
+        from gi.repository import Gtk as _Gtk
+        if hasattr(_Gtk, 'GestureClick') and hasattr(_Gtk, 'Dialog'):
+          try:
+            from terminatorlib.plugin_dialogs_gtk4 import show_run_cmd_on_match_dialog
+            show_run_cmd_on_match_dialog(self, widget)
+            return
+          except Exception:
+            pass
+      except Exception:
+        pass
       ui = {}
       dbox = Gtk.Dialog(
                       _("Run command on match Configuration"),
