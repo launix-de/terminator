@@ -10,6 +10,7 @@ It updates terminatorlib.config.Config and asks the window to refresh shortcuts.
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk
+from .translation import _
 
 from .config import Config, DEFAULTS
 from .plugin import PluginRegistry
@@ -59,6 +60,32 @@ class PreferencesWindow(Gtk.Dialog):
             self.chk_title_bottom.set_active(False)
         general_box.append(self.chk_title_bottom)
 
+        # Selection & clipboard behavior
+        row_clip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_clear_on_copy = Gtk.CheckButton(label="Clear selection after copy")
+        try:
+            self.chk_clear_on_copy.set_active(bool(self.config['clear_select_on_copy']))
+        except Exception:
+            self.chk_clear_on_copy.set_active(False)
+        row_clip.append(self.chk_clear_on_copy)
+        self.chk_disable_mouse_paste = Gtk.CheckButton(label="Disable mouse middle-click paste")
+        try:
+            self.chk_disable_mouse_paste.set_active(bool(self.config['disable_mouse_paste']))
+        except Exception:
+            self.chk_disable_mouse_paste.set_active(False)
+        row_clip.append(self.chk_disable_mouse_paste)
+        general_box.append(row_clip)
+
+        # Window focus behavior
+        row_focus = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_hide_on_lose = Gtk.CheckButton(label="Hide window when it loses focus")
+        try:
+            self.chk_hide_on_lose.set_active(bool(self.config['hide_on_lose_focus']))
+        except Exception:
+            self.chk_hide_on_lose.set_active(False)
+        row_focus.append(self.chk_hide_on_lose)
+        general_box.append(row_focus)
+
         # Link handling
         row_link = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.chk_link_single = Gtk.CheckButton(label="Single-click opens links (with Ctrl)")
@@ -68,6 +95,21 @@ class PreferencesWindow(Gtk.Dialog):
             self.chk_link_single.set_active(False)
         row_link.append(self.chk_link_single)
         general_box.append(row_link)
+
+        # Broadcast default
+        row_bcast = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_bcast.append(Gtk.Label(label=_("Broadcast default"), xalign=0))
+        self.combo_broadcast = Gtk.ComboBoxText()
+        for key, label in (("off",_("Off")),("group",_("Group")),("all",_("All"))):
+            self.combo_broadcast.append_text(label)
+        try:
+            curbd = (self.config['broadcast_default'] or 'group').lower()
+            idx = {"off":0, "group":1, "all":2}.get(curbd, 1)
+            self.combo_broadcast.set_active(idx)
+        except Exception:
+            self.combo_broadcast.set_active(1)
+        row_bcast.append(self.combo_broadcast)
+        general_box.append(row_bcast)
 
         # Tab bar options
         row_tabbar1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -100,6 +142,16 @@ class PreferencesWindow(Gtk.Dialog):
             self.chk_newtab_after_current.set_active(False)
         row_tabbar2.append(self.chk_newtab_after_current)
         general_box.append(row_tabbar2)
+
+        # Split behavior
+        row_split = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_split_with_profile = Gtk.CheckButton(label="Always split with current profile")
+        try:
+            self.chk_split_with_profile.set_active(self.config['always_split_with_profile'])
+        except Exception:
+            self.chk_split_with_profile.set_active(False)
+        row_split.append(self.chk_split_with_profile)
+        general_box.append(row_split)
 
         # Search options
         row_search = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -290,6 +342,84 @@ class PreferencesWindow(Gtk.Dialog):
         row_cursor.append(self.chk_bold_bright)
         prof_box.append(row_cursor)
 
+        # Text rendering and theme colors
+        row_render = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_allow_bold = Gtk.CheckButton(label=_("Allow bold text"))
+        try:
+            self.chk_allow_bold.set_active(self.config['allow_bold'])
+        except Exception:
+            self.chk_allow_bold.set_active(True)
+        row_render.append(self.chk_allow_bold)
+        self.chk_use_theme_colors = Gtk.CheckButton(label=_("Use theme colors (ignore profile fg/bg/palette)"))
+        try:
+            self.chk_use_theme_colors.set_active(self.config['use_theme_colors'])
+        except Exception:
+            self.chk_use_theme_colors.set_active(False)
+        row_render.append(self.chk_use_theme_colors)
+        prof_box.append(row_render)
+
+        # Cursor colors
+        row_cursors = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_cursor_default = Gtk.CheckButton(label=_("Use default cursor colors"))
+        try:
+            self.chk_cursor_default.set_active(self.config['cursor_color_default'])
+        except Exception:
+            self.chk_cursor_default.set_active(True)
+        row_cursors.append(self.chk_cursor_default)
+        row_cursors.append(Gtk.Label(label=_("Cursor FG"), xalign=0))
+        self.cursor_fg_btn = Gtk.ColorDialogButton()
+        try:
+            fg = Gdk.RGBA()
+            val = self.config['cursor_fg_color']
+            if val:
+                fg.parse(val)
+                self.cursor_fg_btn.set_rgba(fg)
+        except Exception:
+            pass
+        row_cursors.append(self.cursor_fg_btn)
+        row_cursors.append(Gtk.Label(label=_("Cursor BG"), xalign=0))
+        self.cursor_bg_btn = Gtk.ColorDialogButton()
+        try:
+            bg = Gdk.RGBA()
+            val = self.config['cursor_bg_color']
+            if val:
+                bg.parse(val)
+                self.cursor_bg_btn.set_rgba(bg)
+        except Exception:
+            pass
+        row_cursors.append(self.cursor_bg_btn)
+        # Sensitivity based on default toggle
+        def sync_cursor_sensitivity():
+            want_default = self.chk_cursor_default.get_active()
+            self.cursor_fg_btn.set_sensitive(not want_default)
+            self.cursor_bg_btn.set_sensitive(not want_default)
+        try:
+            self.chk_cursor_default.connect('toggled', lambda *_a: sync_cursor_sensitivity())
+        except Exception:
+            pass
+        sync_cursor_sensitivity()
+        prof_box.append(row_cursors)
+
+        # Zoom behavior (profile)
+        row_zoom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_disable_wheel_zoom = Gtk.CheckButton(label=_("Disable Ctrl+Mouse wheel zoom"))
+        try:
+            self.chk_disable_wheel_zoom.set_active(bool(self.config['disable_mousewheel_zoom']))
+        except Exception:
+            self.chk_disable_wheel_zoom.set_active(False)
+        row_zoom.append(self.chk_disable_wheel_zoom)
+        prof_box.append(row_zoom)
+
+        # Selection behavior
+        row_sel = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_copy_on_select = Gtk.CheckButton(label="Copy on selection (profile)")
+        try:
+            self.chk_copy_on_select.set_active(bool(self.config['copy_on_selection']))
+        except Exception:
+            self.chk_copy_on_select.set_active(False)
+        row_sel.append(self.chk_copy_on_select)
+        prof_box.append(row_sel)
+
         # Scrollback
         row_scroll = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.chk_scrollback_inf = Gtk.CheckButton(label="Infinite scrollback")
@@ -347,6 +477,58 @@ class PreferencesWindow(Gtk.Dialog):
         scroller_prof.set_hexpand(True)
         scroller_prof.set_vexpand(True)
         notebook.append_page(scroller_prof, Gtk.Label(label="Profiles"))
+        
+        # Titlebar styling controls (colors and font)
+        title_frame = Gtk.Frame(label=_("Titlebar"))
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        title_box.set_margin_top(8)
+        title_box.set_margin_bottom(8)
+        title_box.set_margin_start(8)
+        title_box.set_margin_end(8)
+        # Font controls
+        row_tfont = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_title_use_system_font = Gtk.CheckButton(label=_("Use system font for titlebar"))
+        try:
+            self.chk_title_use_system_font.set_active(self.config['title_use_system_font'])
+        except Exception:
+            self.chk_title_use_system_font.set_active(True)
+        row_tfont.append(self.chk_title_use_system_font)
+        self.title_font_btn = Gtk.FontButton()
+        try:
+            self.title_font_btn.set_font(self.config['title_font'])
+        except Exception:
+            pass
+        row_tfont.append(self.title_font_btn)
+        title_box.append(row_tfont)
+        # Colors for TX/RX/Inactive (fg/bg)
+        def add_color_row(label_text, key_fg, key_bg):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.append(Gtk.Label(label=label_text, xalign=0))
+            fg_btn = Gtk.ColorDialogButton()
+            try:
+                v = self.config[key_fg]
+                if v:
+                    col = Gdk.RGBA(); col.parse(v); fg_btn.set_rgba(col)
+            except Exception:
+                pass
+            row.append(fg_btn)
+            bg_btn = Gtk.ColorDialogButton()
+            try:
+                v = self.config[key_bg]
+                if v:
+                    col = Gdk.RGBA(); col.parse(v); bg_btn.set_rgba(col)
+            except Exception:
+                pass
+            row.append(bg_btn)
+            return row, fg_btn, bg_btn
+        row_tx, self.tx_fg_btn, self.tx_bg_btn = add_color_row(_("Transmit (TX) fg/bg"), 'title_transmit_fg_color', 'title_transmit_bg_color')
+        row_rx, self.rx_fg_btn, self.rx_bg_btn = add_color_row(_("Receive (RX) fg/bg"), 'title_receive_fg_color', 'title_receive_bg_color')
+        row_in, self.in_fg_btn, self.in_bg_btn = add_color_row(_("Inactive fg/bg"), 'title_inactive_fg_color', 'title_inactive_bg_color')
+        title_box.append(row_tx)
+        title_box.append(row_rx)
+        title_box.append(row_in)
+        title_frame.set_child(title_box)
+        prof_box.append(title_frame)
 
         # Plugins tab (enable/disable)
         plugins_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -423,162 +605,198 @@ class PreferencesWindow(Gtk.Dialog):
         entry.add_controller(ctrl)
 
     def on_response(self, dialog, response_id):
-        if response_id == Gtk.ResponseType.OK:
-            # Save general options
+        if response_id != Gtk.ResponseType.OK:
+            self.destroy()
+            return
+        # 1) Save general/global options
+        try:
             self.config['always_on_top'] = self.chk_always_on_top.get_active()
             self.config['hide_from_taskbar'] = self.chk_hide_taskbar.get_active()
+            self.config['show_titlebar'] = self.chk_show_titlebar.get_active()
+            self.config['title_at_bottom'] = self.chk_title_bottom.get_active()
+            self.config['scroll_tabbar'] = self.chk_scroll_tabbar.get_active()
+            self.config['homogeneous_tabbar'] = self.chk_homog_tabbar.get_active()
+            self.config['detachable_tabs'] = self.chk_detachable_tabs.get_active()
+            self.config['new_tab_after_current_tab'] = self.chk_newtab_after_current.get_active()
+            self.config['always_split_with_profile'] = self.chk_split_with_profile.get_active()
+            self.config['clear_select_on_copy'] = self.chk_clear_on_copy.get_active()
+            self.config['disable_mouse_paste'] = self.chk_disable_mouse_paste.get_active()
+            self.config['hide_on_lose_focus'] = self.chk_hide_on_lose.get_active()
+            self.config['tab_position'] = self.combo_tabpos.get_active_text() or 'top'
+            # Search defaults
+            self.config['case_sensitive'] = self.chk_case_sensitive.get_active()
+            self.config['invert_search'] = self.chk_invert_search.get_active()
+            # Link handling
+            self.config['link_single_click'] = self.chk_link_single.get_active()
+            # Broadcast default
+            bd_idx = self.combo_broadcast.get_active()
+            self.config['broadcast_default'] = {0:'off',1:'group',2:'all'}.get(bd_idx, 'group')
             # Ask before closing
-            ask_map = {0: 'never', 1: 'multiple_terminals', 2: 'always'}
-            try:
-                self.config['ask_before_closing'] = ask_map.get(self.ask_combo.get_active(), 'multiple_terminals')
-            except Exception:
-                pass
+            idx = self.ask_combo.get_active()
+            self.config['ask_before_closing'] = {0:'never',1:'multiple_terminals',2:'always'}.get(idx, 'multiple_terminals')
             # Close button on tab
+            self.config['close_button_on_tab'] = self.chk_close_btn.get_active()
+        except Exception:
+            pass
+
+        # 2) Save plugin enable/disable
+        try:
+            enabled = [name for name, chk in self.plugin_checks.items() if chk.get_active()]
+            self.config['enabled_plugins'] = enabled
+            # Optionally refresh plugin registry
+            reg = PluginRegistry()
+            reg.load_plugins(force=True)
+        except Exception:
+            pass
+
+        # 3) Save selected profile settings
+        try:
+            profile = self.profile_combo.get_active_text() or self.config.get_profile()
+            # Temporarily switch profile to write keys
+            self.config.set_profile(profile, True)
+            self.config['use_system_font'] = self.chk_use_system_font.get_active()
             try:
-                self.config['close_button_on_tab'] = self.chk_close_btn.get_active()
+                font = self.font_btn.get_font()
+                if font:
+                    self.config['font'] = font
             except Exception:
                 pass
-            # Tab bar prefs
+            def rgba_to_hex(rgba: Gdk.RGBA):
+                r = int(round(rgba.red * 255))
+                g = int(round(rgba.green * 255))
+                b = int(round(rgba.blue * 255))
+                return f"#{r:02x}{g:02x}{b:02x}"
             try:
-                self.config['scroll_tabbar'] = self.chk_scroll_tabbar.get_active()
-                self.config['homogeneous_tabbar'] = self.chk_homog_tabbar.get_active()
-                self.config['tab_position'] = self.combo_tabpos.get_active_text() or 'top'
+                self.config['foreground_color'] = rgba_to_hex(self.fg_btn.get_rgba())
+                self.config['background_color'] = rgba_to_hex(self.bg_btn.get_rgba())
             except Exception:
                 pass
-            # Save selected profile settings
+            self.config['cursor_blink'] = self.chk_cursor_blink.get_active()
+            self.config['cursor_shape'] = self.cursor_combo.get_active_text() or 'block'
+            self.config['bold_is_bright'] = self.chk_bold_bright.get_active()
             try:
-                profile = self.profile_combo.get_active_text() or self.config.get_profile()
-                # Temporarily switch profile to write keys
-                self.config.set_profile(profile, True)
-                self.config['use_system_font'] = self.chk_use_system_font.get_active()
-                try:
-                    font = self.font_btn.get_font()
-                    if font:
-                        self.config['font'] = font
-                except Exception:
-                    pass
-                def rgba_to_hex(rgba: Gdk.RGBA):
-                    r = int(round(rgba.red * 255))
-                    g = int(round(rgba.green * 255))
-                    b = int(round(rgba.blue * 255))
-                    return f"#{r:02x}{g:02x}{b:02x}"
-                try:
-                    self.config['foreground_color'] = rgba_to_hex(self.fg_btn.get_rgba())
-                    self.config['background_color'] = rgba_to_hex(self.bg_btn.get_rgba())
-                except Exception:
-                    pass
-                self.config['cursor_blink'] = self.chk_cursor_blink.get_active()
-                self.config['cursor_shape'] = self.cursor_combo.get_active_text() or 'block'
-                self.config['bold_is_bright'] = self.chk_bold_bright.get_active()
-                self.config['scrollback_infinite'] = self.chk_scrollback_inf.get_active()
-                try:
-                    self.config['scrollback_lines'] = int(self.spin_scrollback.get_value())
-                except Exception:
-                    pass
-                # Palette writeback
-                try:
+                self.config['allow_bold'] = self.chk_allow_bold.get_active()
+            except Exception:
+                pass
+            try:
+                self.config['use_theme_colors'] = self.chk_use_theme_colors.get_active()
+            except Exception:
+                pass
+            try:
+                self.config['disable_mousewheel_zoom'] = self.chk_disable_wheel_zoom.get_active()
+            except Exception:
+                pass
+            # Cursor colors
+            try:
+                self.config['cursor_color_default'] = self.chk_cursor_default.get_active()
+                # Only store fg/bg when not default
+                if not self.chk_cursor_default.get_active():
                     def rgba_to_hex(rgba: Gdk.RGBA):
                         r = int(round(rgba.red * 255))
                         g = int(round(rgba.green * 255))
                         b = int(round(rgba.blue * 255))
                         return f"#{r:02x}{g:02x}{b:02x}"
-                    cols = [rgba_to_hex(btn.get_rgba()) for btn in self.pal_buttons]
-                    self.config['palette'] = ':'.join(cols)
+                    self.config['cursor_fg_color'] = rgba_to_hex(self.cursor_fg_btn.get_rgba())
+                    self.config['cursor_bg_color'] = rgba_to_hex(self.cursor_bg_btn.get_rgba())
+            except Exception:
+                pass
+            # Titlebar colors and font
+            try:
+                def rgba_to_hex(rgba: Gdk.RGBA):
+                    r = int(round(rgba.red * 255))
+                    g = int(round(rgba.green * 255))
+                    b = int(round(rgba.blue * 255))
+                    return f"#{r:02x}{g:02x}{b:02x}"
+                self.config['title_use_system_font'] = self.chk_title_use_system_font.get_active()
+                try:
+                    f = self.title_font_btn.get_font()
+                    if f:
+                        self.config['title_font'] = f
                 except Exception:
                     pass
+                self.config['title_transmit_fg_color'] = rgba_to_hex(self.tx_fg_btn.get_rgba())
+                self.config['title_transmit_bg_color'] = rgba_to_hex(self.tx_bg_btn.get_rgba())
+                self.config['title_receive_fg_color']  = rgba_to_hex(self.rx_fg_btn.get_rgba())
+                self.config['title_receive_bg_color']  = rgba_to_hex(self.rx_bg_btn.get_rgba())
+                self.config['title_inactive_fg_color'] = rgba_to_hex(self.in_fg_btn.get_rgba())
+                self.config['title_inactive_bg_color'] = rgba_to_hex(self.in_bg_btn.get_rgba())
             except Exception:
                 pass
-            # Save keybindings subset
-            kb = self.config['keybindings']
-            # Detect duplicates among non-empty values
-            values = {}
-            for key, entry in self.kb_entries.items():
-                accel = entry.get_text().strip()
-                # normalize accelerator for comparison
-                if accel:
-                    kv, mods = Gtk.accelerator_parse(accel)
-                    accel = Gtk.accelerator_name(kv, mods) if kv != 0 else accel
-                if accel:
-                    if accel in values:
-                        # Show message and abort save
-                        self._show_duplicate_dialog(accel, values[accel], key)
-                        return
-                    values[accel] = key
-                kb[key] = accel
-            # Persist
+            self.config['scrollback_infinite'] = self.chk_scrollback_inf.get_active()
+            try:
+                self.config['scrollback_lines'] = int(self.spin_scrollback.get_value())
+            except Exception:
+                pass
+            # Selection behavior (profile)
+            try:
+                self.config['copy_on_selection'] = self.chk_copy_on_select.get_active()
+            except Exception:
+                pass
+            # Palette writeback
+            try:
+                cols = [rgba_to_hex(btn.get_rgba()) for btn in self.pal_buttons]
+                self.config['palette'] = ':'.join(cols)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 4) Save keybindings (with duplicate detection)
+        kb = self.config['keybindings']
+        values = {}
+        for key, entry in self.kb_entries.items():
+            accel = entry.get_text().strip()
+            if accel:
+                kv, mods = Gtk.accelerator_parse(accel)
+                accel = Gtk.accelerator_name(kv, mods) if kv != 0 else accel
+            if accel:
+                if accel in values:
+                    self._show_duplicate_dialog(accel, values[accel], key)
+                    return
+                values[accel] = key
+            kb[key] = accel
+
+        # Persist all changes once
+        try:
             self.config.save()
-            # Ask parent to refresh shortcuts, if it supports it
-            parent = self.get_transient_for()
-            if parent and hasattr(parent, 'refresh_shortcuts'):
+        except Exception:
+            pass
+
+        # 5) Ask parent to refresh live UI where applicable
+        parent = self.get_transient_for()
+        if parent:
+            if hasattr(parent, 'refresh_shortcuts'):
                 parent.refresh_shortcuts()
-            # Apply UI-affecting toggles live (e.g., titlebar visibility)
-            if parent and hasattr(parent, 'refresh_titlebars'):
+            if hasattr(parent, 'refresh_titlebars'):
                 parent.refresh_titlebars(self.chk_show_titlebar.get_active())
-            # Titlebar position
-            if parent and hasattr(parent, 'refresh_titlebar_position'):
+            if hasattr(parent, 'refresh_titlebar_position'):
                 parent.refresh_titlebar_position(self.chk_title_bottom.get_active())
-            # Apply notebook prefs live
-            if parent and hasattr(parent, 'refresh_notebook_prefs'):
+            if hasattr(parent, 'refresh_notebook_prefs'):
                 parent.refresh_notebook_prefs()
-            # Update tab close buttons
-            if parent and hasattr(parent, 'refresh_tab_close_buttons'):
+            if hasattr(parent, 'refresh_tab_close_buttons'):
                 parent.refresh_tab_close_buttons()
-            # Apply plugin enable/disable
-            try:
-                enabled = [name for name, chk in self.plugin_checks.items() if chk.get_active()]
-                self.config['enabled_plugins'] = enabled
-                self.config.save()
-                reg = PluginRegistry()
-                reg.load_plugins(force=True)
-            except Exception:
-                pass
-            # Save general toggles
-            try:
-                self.config['always_on_top'] = self.chk_always_on_top.get_active()
-                self.config['hide_from_taskbar'] = self.chk_hide_taskbar.get_active()
-                self.config['show_titlebar'] = self.chk_show_titlebar.get_active()
-                self.config['scroll_tabbar'] = self.chk_scroll_tabbar.get_active()
-                self.config['homogeneous_tabbar'] = self.chk_homog_tabbar.get_active()
-                self.config['detachable_tabs'] = self.chk_detachable_tabs.get_active()
-                self.config['new_tab_after_current_tab'] = self.chk_newtab_after_current.get_active()
-                self.config['title_at_bottom'] = self.chk_title_bottom.get_active()
-                self.config['tab_position'] = self.combo_tabpos.get_active_text() or 'top'
-                self.config['close_button_on_tab'] = self.chk_close_btn.get_active()
-                self.config['ask_before_closing'] = {0:'never',1:'multiple_terminals',2:'always'}.get(self.ask_combo.get_active(), 'multiple_terminals')
-                # Search defaults
-                self.config['case_sensitive'] = self.chk_case_sensitive.get_active()
-                self.config['invert_search'] = self.chk_invert_search.get_active()
-                # Link single-click
-                self.config['link_single_click'] = self.chk_link_single.get_active()
-                self.config.save()
-            except Exception:
-                pass
-            # Save general toggles
-            try:
-                self.config['always_on_top'] = self.chk_always_on_top.get_active()
-                self.config['hide_from_taskbar'] = self.chk_hide_taskbar.get_active()
-                self.config['show_titlebar'] = self.chk_show_titlebar.get_active()
-                self.config['scroll_tabbar'] = self.chk_scroll_tabbar.get_active()
-                self.config['homogeneous_tabbar'] = self.chk_homog_tabbar.get_active()
-                self.config['link_single_click'] = self.chk_link_single.get_active()
-                self.config['tab_position'] = self.combo_tabpos.get_active_text() or 'top'
-                self.config['close_button_on_tab'] = self.chk_close_btn.get_active()
-                # ask_before_closing via combo mapping
-                idx = self.ask_combo.get_active()
-                self.config['ask_before_closing'] = {0:'never',1:'multiple_terminals',2:'always'}.get(idx, 'multiple_terminals')
-                self.config.save()
-            except Exception:
-                pass
+            if hasattr(parent, 'refresh_window_hints'):
+                parent.refresh_window_hints(self.chk_always_on_top.get_active(), self.chk_hide_taskbar.get_active())
+            # Apply broadcast default immediately
+            if hasattr(parent, '_set_groupsend'):
+                try:
+                    bd = {0:'off',1:'group',2:'all'}.get(self.combo_broadcast.get_active(), 'group')
+                    parent._set_groupsend(bd)
+                except Exception:
+                    pass
+            # Apply titlebar styling (colors and font)
+            if hasattr(parent, 'refresh_titlebar_style'):
+                parent.refresh_titlebar_style()
             # Apply updated profile to focused terminal when relevant
             try:
-                if parent:
-                    term = parent._get_focused_terminal()
-                    if term is not None and hasattr(term, 'config') and hasattr(term, 'apply_profile'):
-                        sel_profile = self.profile_combo.get_active_text() or term.config.get_profile()
-                        if term.config.get_profile() == sel_profile:
-                            term.apply_profile()
+                term = parent._get_focused_terminal()
+                if term is not None and hasattr(term, 'config') and hasattr(term, 'apply_profile'):
+                    sel_profile = self.profile_combo.get_active_text() or term.config.get_profile()
+                    if term.config.get_profile() == sel_profile:
+                        term.apply_profile()
             except Exception:
                 pass
+
         self.destroy()
 
     def _on_profile_add(self):

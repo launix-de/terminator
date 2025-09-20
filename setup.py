@@ -167,10 +167,18 @@ class InstallData(install_data):
   def _find_css_files (self):
     data_files = []
 
+    # Install gtk-3.0 theme assets in each theme directory
     for css_dir in glob.glob (os.path.join (CSS_DIR, '*')):
        srce = glob.glob (os.path.join(css_dir, 'gtk-3.0', 'apps', '*.css'))
-       dest = os.path.join('share', 'terminator', css_dir, 'gtk-3.0', 'apps')
-       data_files.append((dest, srce))
+        # Skip if directory doesn't contain gtk-3.0 assets
+       if srce:
+           dest = os.path.join('share', 'terminator', css_dir, 'gtk-3.0', 'apps')
+           data_files.append((dest, srce))
+
+    # Install gtk-4.0 CSS if present (single global file for now)
+    gtk4_css = os.path.join(CSS_DIR, 'gtk-4.0', 'terminator.css')
+    if os.path.exists(gtk4_css):
+        data_files.append((os.path.join('share', 'terminator', 'themes', 'gtk-4.0'), [gtk4_css]))
 
     return data_files
 
@@ -227,6 +235,10 @@ setup(name=APP_NAME,
           'psutil',
       ],
       extras_require={'test': test_deps},
-      package_data={'terminatorlib': ['preferences.glade', 'layoutlauncher.glade']},
+      package_data={'terminatorlib': [
+          'preferences.glade',
+          'layoutlauncher.glade',
+          'themes/gtk-4.0/terminator.css',
+      ]},
       cmdclass={'build': BuildData, 'install_data': InstallData, 'uninstall': Uninstall},
       distclass=TerminatorDist)

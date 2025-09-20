@@ -318,7 +318,8 @@ def build_plugin_menu_for_terminal(terminal) -> Tuple[Optional[Gio.MenuModel], L
     """
     try:
         registry = PluginRegistry()
-        registry.load_plugins()
+        # Load only terminal_menu plugins to avoid instantiating URL handlers
+        registry.load_plugins(force=True, capabilities_filter={'terminal_menu'})
         plugins = registry.get_plugins_by_capability('terminal_menu')
     except Exception:
         plugins = []

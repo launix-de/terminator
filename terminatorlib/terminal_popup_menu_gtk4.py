@@ -2,7 +2,7 @@
 
 Builds a Gio.MenuModel/Gtk.PopoverMenu and uses the terminal's action group
 (`term.*` actions) to execute behaviors, matching the original layout.
-Plugins are not yet integrated in this GTK4 variant.
+Plugin menus are integrated via `plugin_gtk4_adapter.build_plugin_menu_for_terminal`.
 """
 
 import gi
@@ -24,6 +24,7 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     sec1.append(_('_Copy'), 'term.copy')
     sec1.append(_('_Copy as HTML'), 'term.copy_html')
     sec1.append(_('_Paste'), 'term.paste')
+    sec1.append(_('Paste Se_lection'), 'term.paste_selection')
     menu.append_section(None, sec1)
 
     # Actions
@@ -33,10 +34,14 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     sec2.append(_('_Find…'), 'term.search')
     sec2.append(_('Find _Next'), 'term.find_next')
     sec2.append(_('Find _Previous'), 'term.find_previous')
+    sec2.append(_('Find _Next'), 'term.find_next')
+    sec2.append(_('Find _Previous'), 'term.find_previous')
     sec2.append(_('Split _Auto'), 'term.split_auto')
     sec2.append(_('Split H_orizontally'), 'term.split_horiz')
     sec2.append(_('Split V_ertically'), 'term.split_vert')
     sec2.append(_('Open _Tab'), 'term.new_tab')
+    sec2.append(_('_Reset'), 'term.reset')
+    sec2.append(_('Reset and _Clear'), 'term.reset_clear')
     sec2.append(_('_Close'), 'term.close')
     menu.append_section(None, sec2)
 
@@ -44,6 +49,7 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     sec3 = Gio.Menu()
     sec3.append(_('_Zoom terminal'), 'term.zoom')
     sec3.append(_('Ma_ximize terminal'), 'term.maximize')
+    sec3.append(_('_Full Screen'), 'term.full_screen')
     menu.append_section(None, sec3)
 
     # Toggles / Preferences
@@ -51,6 +57,8 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     sec4.append(_('_Read only'), 'term.toggle_readonly')
     sec4.append(_('Show _scrollbar'), 'term.toggle_scrollbar')
     sec4.append(_('_Preferences'), 'term.preferences')
+    sec4.append(_('New _Window'), 'term.new_window')
+    sec4.append(_('_Hide Window'), 'term.hide_window')
 
     # Profiles submenu
     profiles = sorted(cfg.list_profiles(), key=str.lower)
@@ -138,6 +146,11 @@ def build_menu_model(terminal) -> Gio.MenuModel:
                             ag.add_action(act)
                 except Exception:
                     continue
+    # Help
+    secH = Gio.Menu()
+    secH.append(_('_Help'), 'term.help')
+    menu.append_section(None, secH)
+
     return menu
 
 

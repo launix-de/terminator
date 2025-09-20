@@ -9,6 +9,7 @@ Provides minimal controls:
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GObject
+from .translation import _
 
 
 class Gtk4Titlebar(Gtk.Box):
@@ -140,19 +141,19 @@ class Gtk4Titlebar(Gtk.Box):
 
         win = self._window
 
-        add_action('Rename Tab', lambda: getattr(win, '_on_edit_tab_title')())
-        add_action('Set Window Title', lambda: getattr(win, '_on_edit_window_title')())
+        add_action(_('Rename Tab'), lambda: getattr(win, '_on_edit_tab_title')())
+        add_action(_('Set Window Title'), lambda: getattr(win, '_on_edit_window_title')())
         # Splits
         try:
             from gi.repository import Gtk as _Gtk
-            add_action('Split Horizontally', lambda: getattr(win, '_on_split')(_Gtk.Orientation.HORIZONTAL))
-            add_action('Split Vertically', lambda: getattr(win, '_on_split')(_Gtk.Orientation.VERTICAL))
+            add_action(_('Split Horizontally'), lambda: getattr(win, '_on_split')(_Gtk.Orientation.HORIZONTAL))
+            add_action(_('Split Vertically'), lambda: getattr(win, '_on_split')(_Gtk.Orientation.VERTICAL))
         except Exception:
             pass
         # Group
-        add_action('Create Group…', lambda: getattr(win, '_on_create_group')())
+        add_action(_('Create Group…'), lambda: getattr(win, '_on_create_group')())
         # Close terminal
-        add_action('Close Terminal', lambda: getattr(win, '_on_close_term')())
+        add_action(_('Close Terminal'), lambda: getattr(win, '_on_close_term')())
 
         pop.set_child(box)
         pop.popup()

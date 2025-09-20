@@ -28,7 +28,8 @@ import os
 from . import borg
 from .config import Config
 from .util import dbg, err, get_config_dir
-from .terminator import Terminator
+# Avoid importing Terminator at module import time to prevent
+# GTK3/GTK4 GI version conflicts. Import lazily where needed.
 
 class Plugin(object):
     """Definition of our base plugin class"""
@@ -69,8 +70,14 @@ class PluginRegistry(borg.Borg):
         if not self.available_plugins:
             self.available_plugins = {}
 
-    def load_plugins(self, force=False):
-        """Load all plugins present in the plugins/ directory in our module"""
+    def load_plugins(self, force=False, capabilities_filter=None):
+        """Load all plugins present in the plugins/ directory in our module.
+
+        capabilities_filter: optional iterable of capability strings. When set,
+        only instantiate plugins whose class 'capabilities' intersects with the
+        filter. Plugins outside the filter remain discoverable via
+        get_available_plugins but are not instantiated.
+        """
         if self.done and (not force):
             dbg('Already loaded')
             return
@@ -101,6 +108,19 @@ class PluginRegistry(borg.Borg):
 
                             if item not in config['enabled_plugins']:
                                 dbg('plugin %s not enabled, skipping' % item)
+                                continue
+                            # Respect capability filter when instantiating
+                            try:
+                                caps = set(getattr(func, 'capabilities', []) or [])
+                            except Exception:
+                                caps = set()
+                            allowed = True
+                            if capabilities_filter:
+                                try:
+                                    allowed = bool(caps.intersection(set(capabilities_filter)))
+                                except Exception:
+                                    allowed = True
+                            if not allowed:
                                 continue
                             if item not in self.instances:
                                 self.instances[item] = func()
@@ -171,9 +191,18 @@ class URLHandler(Plugin):
     def __init__(self):
         """Class initialiser"""
         Plugin.__init__(self)
-        terminator = Terminator()
-        for terminal in terminator.terminals:
-            terminal.match_add(self.handler_name, self.match)
+        try:
+            # Lazy import to avoid loading GTK3 Terminator during GTK4 path
+            from .terminator import Terminator as _Terminator
+            terminator = _Terminator()
+            for terminal in getattr(terminator, 'terminals', []):
+                try:
+                    terminal.match_add(self.handler_name, self.match)
+                except Exception:
+                    pass
+        except Exception:
+            # If anything goes wrong, skip registering URL handlers
+            pass
 
     def callback(self, url):
         """Callback to transform the enclosed URL"""
@@ -184,9 +213,16 @@ class URLHandler(Plugin):
         if not self.handler_name:
             err('unload called without self.handler_name being set')
             return
-        terminator = Terminator()
-        for terminal in terminator.terminals:
-            terminal.match_remove(self.handler_name)
+        try:
+            from .terminator import Terminator as _Terminator
+            terminator = _Terminator()
+            for terminal in getattr(terminator, 'terminals', []):
+                try:
+                    terminal.match_remove(self.handler_name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 # MenuItem - This is able to execute code during the construction of the
 #             context menu of a Terminal.
@@ -206,8 +242,18 @@ in layout keybindings
 Vishweshwar Saran Singh Deo vssdeo@gmail.com
 """
 
-from gi.repository import Gtk, Gdk
-from terminatorlib.keybindings import Keybindings, KeymapError
+# Keybinding utilities: import lazily and tolerate GTK4 without GTK3 keymaps
+try:
+    from gi.repository import Gtk, Gdk
+except Exception:
+    Gtk = None
+    Gdk = None
+try:
+    from terminatorlib.keybindings import Keybindings, KeymapError
+except Exception:
+    Keybindings = None
+    class KeymapError(Exception):
+        pass
 
 PLUGIN_UTIL_DESC = 0
 PLUGIN_UTIL_ACT  = 1
@@ -215,14 +261,13 @@ PLUGIN_UTIL_KEYS = 2
 
 class KeyBindUtil:
 
-    keybindings = Keybindings()
-
-    map_key_to_act  = {}
-    map_act_to_keys = {}
-    map_act_to_desc = {}
-
     def __init__(self, config=None):
         self.config = config
+        # Lazy init keybindings only if available
+        self.keybindings = Keybindings() if Keybindings is not None else None
+        self.map_key_to_act  = {}
+        self.map_act_to_keys = {}
+        self.map_act_to_desc = {}
 
     #Example
     #  bind

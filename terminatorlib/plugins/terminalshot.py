@@ -32,19 +32,63 @@ class TerminalShot(plugin.MenuItem):
 
     def terminalshot(self, _widget, terminal):
         """Handle the taking, prompting and saving of a terminalshot"""
-        # Grab a pixbuf of the terminal (GTK3 util); GTK4 may not support this path
+        # Try GTK4 snapshot path first
+        orig_pixbuf = None
+        snapshot_tempfile = None
         try:
-            orig_pixbuf = widget_pixbuf(terminal)
-        except Exception as e:
-            errdlg = Gtk.MessageDialog(transient_for=(terminal.get_root() if hasattr(terminal, 'get_root') else None),
-                                       modal=True,
-                                       message_type=Gtk.MessageType.ERROR,
-                                       buttons=Gtk.ButtonsType.OK,
-                                       text=_('Terminal screenshot is not available on this backend.'))
-            errdlg.format_secondary_text(str(e))
-            errdlg.connect('response', lambda d, r: d.destroy())
-            errdlg.present()
-            return
+            # Render widget to a texture via GSK and save as PNG
+            from gi.repository import Gsk, Graphene, Gdk
+            # Ensure widget has a valid allocation
+            w = getattr(terminal, 'get_allocated_width', lambda: 0)()
+            h = getattr(terminal, 'get_allocated_height', lambda: 0)()
+            if w <= 0 or h <= 0:
+                terminal.queue_allocate()
+                # Let GTK flush a frame
+                while Gtk.events_pending():
+                    Gtk.main_iteration_do(False)
+                w = getattr(terminal, 'get_allocated_width', lambda: 0)()
+                h = getattr(terminal, 'get_allocated_height', lambda: 0)()
+            native = terminal.get_native() if hasattr(terminal, 'get_native') else None
+            surface = native.get_surface() if native and hasattr(native, 'get_surface') else None
+            if surface is None or w <= 0 or h <= 0:
+                raise RuntimeError('No native surface or invalid size')
+            snap = Gtk.Snapshot.new()
+            # Snapshot the widget subtree
+            terminal.snapshot(snap)
+            node = snap.to_node()
+            renderer = None
+            try:
+                renderer = Gsk.Renderer.for_surface(surface)
+            except Exception:
+                try:
+                    renderer = Gsk.Renderer.new_for_surface(surface)
+                except Exception:
+                    pass
+            if renderer is None:
+                raise RuntimeError('No GSK renderer')
+            # Viewport: full widget area
+            rect = Graphene.Rect()
+            rect.init(0.0, 0.0, float(w), float(h))
+            texture = renderer.render_texture(node, rect)
+            # Save texture directly to PNG path later
+            snapshot_tempfile = texture
+        except Exception:
+            snapshot_tempfile = None
+
+        if snapshot_tempfile is None:
+            # Fallback: GTK3 utility path using cairo/Gdk (may fail on GTK4)
+            try:
+                orig_pixbuf = widget_pixbuf(terminal)
+            except Exception as e:
+                errdlg = Gtk.MessageDialog(transient_for=(terminal.get_root() if hasattr(terminal, 'get_root') else None),
+                                           modal=True,
+                                           message_type=Gtk.MessageType.ERROR,
+                                           buttons=Gtk.ButtonsType.OK,
+                                           text=_('Terminal screenshot is not available on this backend.'))
+                errdlg.format_secondary_text(str(e))
+                errdlg.connect('response', lambda d, r: d.destroy())
+                errdlg.present()
+                return
 
         path = None
         # Prefer GTK4 FileDialog if available
@@ -102,7 +146,16 @@ class TerminalShot(plugin.MenuItem):
                 # Ensure .png extension
                 if not path.lower().endswith('.png'):
                     path += '.png'
-                orig_pixbuf.savev(path, 'png', [], [])
+                if snapshot_tempfile is not None:
+                    # Save GdkTexture to PNG when available
+                    try:
+                        snapshot_tempfile.save_to_png(path)
+                        return
+                    except Exception:
+                        pass
+                # Fallback: save pixbuf
+                if orig_pixbuf is not None:
+                    orig_pixbuf.savev(path, 'png', [], [])
             except Exception as e:
                 errdlg = Gtk.MessageDialog(transient_for=(terminal.get_root() if hasattr(terminal, 'get_root') else None),
                                            modal=True,

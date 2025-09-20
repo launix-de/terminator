@@ -3,6 +3,10 @@ Terminator
 
 Started by Chris Jones <cmsj@tenshu.net> in 2007, maintained from 2014 to 2020 by Stephen Boddy, currently maintained by Matt Rose. Terminator has had contributions from countless others listed in the [AUTHORS](AUTHORS) file
 
+## About this fork (GTK4 port)
+
+This repository is a fork focused on porting Terminator to GTK 4 and VTE 3.91. The port is in progress and features are being migrated incrementally to match the original behavior as closely as possible. See `port.md` for current status and the GTK 4 section below for how to run the GTK4 build.
+
 ## Description
 
 Terminator was originally developed by Chris Jones in 2007 as a simple, 300-ish line python script.  Since then, it has become The Robot Future of Terminals.  Originally inspired by projects like quadkonsole and gnome-multi-term and more recently by projects like Iterm2, and Tilix, It lets you combine and recombine terminals to suit the style you like.  If you live at the command-line, or are logged into 10 different remote machines at once, you should definitely try out Terminator.

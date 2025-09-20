@@ -45,6 +45,9 @@ def _ensure_gtk4_and_vte():
 
 
 if __name__ == '__main__':
+    # Accept optional --gtk4 flag per port.md; ignore if present
+    if '--gtk4' in sys.argv:
+        sys.argv.remove('--gtk4')
     _ensure_gtk4_and_vte()
 
     # Parse legacy Terminator options to avoid Gio.Application rejecting them.

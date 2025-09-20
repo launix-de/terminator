@@ -20,3 +20,20 @@
   opacity: 0.7;
 }
 
+/* Optional hover styling for URLs when Ctrl is held (class added by code) */
+.vte-link-hover {
+  /* Slight background hint; underline may not affect VTE content */
+  box-shadow: inset 0 -1px @theme_selected_bg_color;
+}
+
+/* Tabs: lightweight hover/active states for our custom tab label widget */
+.tab-label {
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tab-label:hover {
+  background-color: alpha(@theme_selected_bg_color, 0.08);
+}
+.tab-label.active {
+  background-color: alpha(@theme_selected_bg_color, 0.18);
+}

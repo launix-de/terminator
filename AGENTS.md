@@ -2,6 +2,8 @@
 
 This guide helps contributors work efficiently in this repository.
 
+In the moment we are porting to gtk4, so especially obey the info in the gtk4 section
+
 ## Project Structure & Module Organization
 - `terminatorlib/`: Core Python/GTK code (VTE integration, menus, config, plugins).
 - `terminator`: Launcher script for the application.
@@ -45,3 +47,13 @@ Notes:
 ## Agent-Specific Notes
 - Respect these guidelines for any automated edits. Do not modify unrelated files. Keep diffs focused and follow existing menu/translation patterns.
 
+## GTK 4 Porting Rules & Hints
+- Target Gtk 4.0 and VTE 3.91. Do not introduce alternate toolkits.
+- This rule applies to all requests, prompts, bug reports and feature requests that you have to work on: compare old and new code, port the mentioned features to gtk4.
+- original source code can be found in commit a272b09578a8a8ba7e22fd66904866cd35604e98
+- go through the old source code line by line and translate function calls
+- Replace deprecated APIs
+- adapt to API changes
+- try to recreate old behaviour as exact as possible
+- positioning rules have meanings. example: double clicking a tab header opens the rename window exactly over the tab header
+- further instructions in port.md

@@ -5,6 +5,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, GLib, Vte, Gio, Gdk
+from .translation import _
 from gi.repository import Pango
 from gi.repository import Pango
 from .config import Config
@@ -39,9 +40,15 @@ class Gtk4Terminal(Vte.Terminal):
         self._font_scale = 1.0
         self._install_context_menu()
         self._install_url_handling()
+        self._copy_on_sel_handler = None
         # Update window/tab titles on VTE title changes
         try:
             self.connect('window-title-changed', self._on_window_title_changed)
+        except Exception:
+            pass
+        # Some shells/apps use icon-title; update on that as well
+        try:
+            self.connect('icon-title-changed', self._on_window_title_changed)
         except Exception:
             pass
         try:
@@ -52,6 +59,15 @@ class Gtk4Terminal(Vte.Terminal):
         self._search_last_kind = None  # 'vte' | 'glib'
         self._search_is_regex = False
         self._search_case_sensitive = True
+        # Selection copy-on-select (optional)
+        try:
+            if bool(self.config['copy_on_selection']) and self._copy_on_sel_handler is None:
+                try:
+                    self._copy_on_sel_handler = self.connect('selection-changed', self._on_selection_changed_copy)
+                except Exception:
+                    self._copy_on_sel_handler = None
+        except Exception:
+            pass
         # Apply current profile settings to this terminal
         try:
             self.apply_profile()
@@ -116,6 +132,28 @@ class Gtk4Terminal(Vte.Terminal):
         except Exception:
             pass
 
+        # Ctrl + mouse wheel zoom
+        try:
+            scr = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
+            def on_scroll(controller, dx, dy):
+                # Only handle when Ctrl is held, and feature not disabled in profile
+                if getattr(self, '_zoom_wheel_disabled', False):
+                    return False
+                if not getattr(self, '_ctrl_down', False):
+                    return False
+                try:
+                    if dy < 0:
+                        self.zoom_step(0.1)
+                    elif dy > 0:
+                        self.zoom_step(-0.1)
+                except Exception:
+                    pass
+                return True
+            scr.connect('scroll', on_scroll)
+            self.add_controller(scr)
+        except Exception:
+            pass
+
         # Change cursor when hovering links while holding Ctrl
         try:
             mctrl = Gtk.EventControllerMotion()
@@ -144,6 +182,30 @@ class Gtk4Terminal(Vte.Terminal):
                         pass
             click.connect('released', on_released)
             self.add_controller(click)
+        except Exception:
+            pass
+
+        # Optionally disable middle-click paste
+        try:
+            mid = Gtk.GestureClick.new()
+            mid.set_button(2)
+            try:
+                mid.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            except Exception:
+                pass
+            def on_mid_pressed(gesture, n_press, x, y):
+                try:
+                    from .config import Config as _Cfg
+                    if bool(_Cfg()['disable_mouse_paste']):
+                        try:
+                            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+            mid.connect('pressed', on_mid_pressed)
+            self.add_controller(mid)
         except Exception:
             pass
 
@@ -202,10 +264,21 @@ class Gtk4Terminal(Vte.Terminal):
                         self.set_tooltip_text(uri)
                     except Exception:
                         pass
+                    try:
+                        # Add CSS class to allow hover styling from theme
+                        if 'vte-link-hover' not in self.get_css_classes():
+                            self.add_css_class('vte-link-hover')
+                    except Exception:
+                        pass
                 else:
                     self.set_cursor(None)
                     try:
                         self.set_tooltip_text(None)
+                    except Exception:
+                        pass
+                    try:
+                        if 'vte-link-hover' in self.get_css_classes():
+                            self.remove_css_class('vte-link-hover')
                     except Exception:
                         pass
         except Exception:
@@ -271,6 +344,46 @@ class Gtk4Terminal(Vte.Terminal):
     # Many GTK3-era plugins expect Terminal.get_vte()
     def get_vte(self):
         return self
+
+    # GTK3 compatibility shims for plugins
+    def get_toplevel(self):
+        try:
+            return self.get_root()
+        except Exception:
+            return None
+
+    def get_window_title(self):
+        try:
+            win = self.get_root()
+            if hasattr(win, 'get_title'):
+                return win.get_title()
+        except Exception:
+            pass
+        return ''
+
+    def set_profile(self, _sender=None, profile: str | None = None):
+        try:
+            if profile:
+                self.config.set_profile(profile, True)
+                self.apply_profile()
+        except Exception:
+            pass
+
+    def get_profile(self) -> str:
+        try:
+            return self.config.get_profile()
+        except Exception:
+            return 'default'
+
+    def _on_selection_changed_copy(self, *args):
+        try:
+            # Prefer primary selection if supported by VTE, else regular
+            if hasattr(self, 'copy_primary'):
+                self.copy_primary()
+            else:
+                self.copy_clipboard()
+        except Exception:
+            pass
 
     def spawn_command(self, argv, cwd: str | None = None, env: dict | None = None):
         if cwd is None:
@@ -478,6 +591,26 @@ class Gtk4Terminal(Vte.Terminal):
             a = Gio.SimpleAction.new('find_previous', None)
             a.connect('activate', lambda *aa: self._search_find(False))
             self._action_group.add_action(a)
+        # Help
+        if self._action_group.lookup_action('help') is None:
+            a = Gio.SimpleAction.new('help', None)
+            a.connect('activate', lambda *aa: (getattr(self.get_root(), '_on_help', lambda *a: None)()))
+            self._action_group.add_action(a)
+        # Paste selection, reset, reset_clear, full_screen, new_window, hide_window
+        def win_call(method):
+            w = self.get_root()
+            return getattr(w, method, None)
+        def add_simple_action(name, cb):
+            if self._action_group.lookup_action(name) is None:
+                a = Gio.SimpleAction.new(name, None)
+                a.connect('activate', cb)
+                self._action_group.add_action(a)
+        add_simple_action('paste_selection', lambda *a: win_call('_on_paste_selection') and win_call('_on_paste_selection')())
+        add_simple_action('reset', lambda *a: win_call('_on_reset_terminal') and win_call('_on_reset_terminal')())
+        add_simple_action('reset_clear', lambda *a: win_call('_on_reset_clear_terminal') and win_call('_on_reset_clear_terminal')())
+        add_simple_action('full_screen', lambda *a: win_call('_on_full_screen') and win_call('_on_full_screen')())
+        add_simple_action('new_window', lambda *a: win_call('_on_new_window') and win_call('_on_new_window')())
+        add_simple_action('hide_window', lambda *a: win_call('_on_hide_window') and win_call('_on_hide_window')())
         # Grouping related actions
         def add_simple(name, cb):
             if self._action_group.lookup_action(name) is None:
@@ -650,22 +783,22 @@ class Gtk4Terminal(Vte.Terminal):
         pop.set_autohide(True)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         entry = Gtk.Entry()
-        entry.set_placeholder_text('Find…')
+        entry.set_placeholder_text(_('Find…'))
         box.append(entry)
-        btn_prev = Gtk.Button(label='Prev')
-        btn_next = Gtk.Button(label='Next')
+        btn_prev = Gtk.Button(label=_('Prev'))
+        btn_next = Gtk.Button(label=_('Next'))
         box.append(btn_prev)
         box.append(btn_next)
         # Options: Regex, Case Sensitive
         chk_regex = Gtk.CheckButton(label='.*')
-        chk_regex.set_tooltip_text('Use regular expressions')
+        chk_regex.set_tooltip_text(_('Use regular expressions'))
         try:
             chk_regex.set_active(bool(self._search_is_regex))
         except Exception:
             pass
         box.append(chk_regex)
         chk_case = Gtk.CheckButton(label='Aa')
-        chk_case.set_tooltip_text('Case sensitive')
+        chk_case.set_tooltip_text(_('Case sensitive'))
         try:
             from .config import Config as _Cfg
             cfg = _Cfg()
@@ -676,10 +809,10 @@ class Gtk4Terminal(Vte.Terminal):
         box.append(chk_case)
         # Whole word, Wrap
         chk_word = Gtk.CheckButton(label='\u2423w')  # visual hint for word
-        chk_word.set_tooltip_text('Whole word')
+        chk_word.set_tooltip_text(_('Whole word'))
         box.append(chk_word)
         chk_wrap = Gtk.CheckButton(label='\u21ba')  # wrap arrow
-        chk_wrap.set_tooltip_text('Wrap around')
+        chk_wrap.set_tooltip_text(_('Wrap around'))
         try:
             # Try to reflect current wrap setting if available
             # No direct getter; default to True for convenience
@@ -692,19 +825,21 @@ class Gtk4Terminal(Vte.Terminal):
         def compile_regex(pattern):
             try:
                 from gi.repository import Vte
-                rxpat = pattern
-                # Apply case-insensitive by inline flag when using Vte.Regex
-                if not chk_case.get_active():
-                    rxpat = '(?i)' + pattern
+                # VTE requires multiline compile flag; use inline (?m)
+                if chk_case.get_active():
+                    rxpat = '(?m)' + pattern
+                else:
+                    rxpat = '(?im)' + pattern
                 rx = Vte.Regex.new_for_search(rxpat, 0, 0)
                 return ('vte', rx)
             except Exception:
                 try:
                     from gi.repository import GLib
-                    flags = 0
-                    # Fall back to GLib.Regex; flags for case may differ, so inline handled similarly
-                    rxpat = pattern if chk_case.get_active() else '(?i)' + pattern
-                    rx = GLib.Regex.new(rxpat, flags, 0)
+                    # GLib regex: set MULTILINE compile flag; add CASELESS if needed
+                    flags = int(getattr(GLib.RegexCompileFlags, 'MULTILINE', 0))
+                    if not chk_case.get_active():
+                        flags |= int(getattr(GLib.RegexCompileFlags, 'CASELESS', 0))
+                    rx = GLib.Regex.new(pattern, flags, 0)
                     return ('glib', rx)
                 except Exception:
                     return (None, None)
@@ -850,24 +985,29 @@ class Gtk4Terminal(Vte.Terminal):
             except Exception:
                 pass
 
-        # Colors and palette
+        # Colors and palette (respect use_theme_colors)
         try:
-            fg = rgba(prof.get('foreground_color', ''))
-            bg = rgba(prof.get('background_color', ''))
-            palette = None
-            pal_str = prof.get('palette')
-            if pal_str:
-                parts = pal_str.split(':')
-                cols = []
-                for p in parts:
-                    rc = rgba(p)
-                    if rc:
-                        cols.append(rc)
-                if cols:
-                    palette = cols
-            if hasattr(self, 'set_colors'):
-                # set_colors(fg, bg, palette)
-                self.set_colors(fg, bg, palette)
+            use_theme = bool(prof.get('use_theme_colors', False))
+        except Exception:
+            use_theme = False
+        try:
+            if not use_theme:
+                fg = rgba(prof.get('foreground_color', ''))
+                bg = rgba(prof.get('background_color', ''))
+                palette = None
+                pal_str = prof.get('palette')
+                if pal_str:
+                    parts = pal_str.split(':')
+                    cols = []
+                    for p in parts:
+                        rc = rgba(p)
+                        if rc:
+                            cols.append(rc)
+                    if cols:
+                        palette = cols
+                if hasattr(self, 'set_colors'):
+                    # set_colors(fg, bg, palette)
+                    self.set_colors(fg, bg, palette)
         except Exception:
             pass
 
@@ -905,6 +1045,68 @@ class Gtk4Terminal(Vte.Terminal):
         try:
             if hasattr(self, 'set_bold_is_bright'):
                 self.set_bold_is_bright(bool(prof.get('bold_is_bright', False)))
+        except Exception:
+            pass
+
+        # Cursor colors
+        try:
+            if not bool(prof.get('cursor_color_default', True)):
+                # Determine fg/bg for cursor from profile, with sensible fallbacks
+                cur_fg = rgba(prof.get('cursor_fg_color', ''))
+                if cur_fg is None:
+                    # Fallback to background color
+                    cur_fg = rgba(prof.get('background_color', ''))
+                cur_bg = rgba(prof.get('cursor_bg_color', ''))
+                if cur_bg is None:
+                    # Fallback to foreground color
+                    cur_bg = rgba(prof.get('foreground_color', ''))
+                try:
+                    if hasattr(self, 'set_color_cursor_foreground') and cur_fg is not None:
+                        self.set_color_cursor_foreground(cur_fg)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'set_color_cursor') and cur_bg is not None:
+                        self.set_color_cursor(cur_bg)
+                except Exception:
+                    pass
+            else:
+                # Use defaults/theme; if there are reset APIs, attempt best-effort
+                pass
+        except Exception:
+            pass
+
+        # Copy on selection (connect or disconnect handler per profile)
+        try:
+            want = bool(prof.get('copy_on_selection', False))
+            if want and self._copy_on_sel_handler is None:
+                try:
+                    self._copy_on_sel_handler = self.connect('selection-changed', self._on_selection_changed_copy)
+                except Exception:
+                    self._copy_on_sel_handler = None
+            if (not want) and self._copy_on_sel_handler is not None:
+                try:
+                    self.disconnect(self._copy_on_sel_handler)
+                except Exception:
+                    pass
+                self._copy_on_sel_handler = None
+        except Exception:
+            pass
+
+        # Wheel zoom disable flag
+        try:
+            self._zoom_wheel_disabled = bool(prof.get('disable_mousewheel_zoom', False))
+        except Exception:
+            self._zoom_wheel_disabled = False
+
+        # Update stateful profile action so menus reflect the current selection
+        try:
+            ag = getattr(self, '_action_group', None)
+            if ag is not None:
+                act = ag.lookup_action('profile')
+                if act is not None:
+                    from gi.repository import GLib as _GLib
+                    act.set_state(_GLib.Variant('s', cfg.get_profile()))
         except Exception:
             pass
 

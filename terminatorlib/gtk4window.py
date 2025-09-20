@@ -8,6 +8,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, GLib, Gdk
+from .translation import _
 
 from .gtk4terminal import Gtk4Terminal
 from .gtk4titlebar import Gtk4Titlebar
@@ -53,15 +54,44 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             disp = Gdk.Display.get_default()
             if disp is not None:
                 Gtk.StyleContext.add_provider_for_display(disp, prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            # Keep a provider for dynamic titlebar color/font overrides from Config
+            self._title_css_provider = Gtk.CssProvider()
+            if disp is not None:
+                Gtk.StyleContext.add_provider_for_display(disp, self._title_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception:
             pass
-        # Initialize broadcast_default from config
+        # Initialize window hints and broadcast_default from config
         try:
             from .config import Config
             cfg = Config()
+            # Always on top / hide from taskbar where supported
+            try:
+                if hasattr(self, 'set_keep_above'):
+                    self.set_keep_above(bool(cfg['always_on_top']))
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'set_skip_taskbar_hint'):
+                    self.set_skip_taskbar_hint(bool(cfg['hide_from_taskbar']))
+            except Exception:
+                pass
             bd = (cfg['broadcast_default'] or 'group').lower()
             if bd in ('all', 'group', 'off'):
                 self._set_groupsend(bd)
+        except Exception:
+            pass
+
+        # Hide on lose focus
+        try:
+            def on_notify_is_active(win, _pspec):
+                try:
+                    from .config import Config as _Cfg
+                    if not win.get_property('is-active') and bool(_Cfg()['hide_on_lose_focus']):
+                        win.hide()
+                except Exception:
+                    pass
+            # 'is-active' is a property on Gtk.Window that changes with focus
+            self.connect('notify::is-active', on_notify_is_active)
         except Exception:
             pass
 
@@ -82,12 +112,22 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
 
         # Spawn user's shell
         term.spawn_login_shell()
+        # Apply titlebar style overrides from config on startup
+        try:
+            self.refresh_titlebar_style()
+        except Exception:
+            pass
 
     def on_child_exited(self, term, status):
         # If there are multiple terminals, remove just this one; else close
         scroller = term.get_parent()
         unit = scroller.get_parent()  # our terminal container (titlebar + scroller)
         parent = unit.get_parent()
+        def terminals_remain():
+            try:
+                return self._count_terminals_in(self.get_child()) > 0
+            except Exception:
+                return False
         if isinstance(parent, Gtk.Paned):
             # Identify the sibling to keep
             if parent.get_end_child() is unit:
@@ -131,6 +171,9 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     grand.remove_page(idx)
                     grand.insert_page(other, label, idx)
                     grand.set_current_page(idx)
+            # If any terminals remain, don't close the window
+            if terminals_remain():
+                return
         elif isinstance(parent, Gtk.Notebook):
             # Remove just this tab; keep window open if other tabs remain
             idx = -1
@@ -152,6 +195,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         else:
             # Not inside a Paned or Notebook (single view). Close the window.
             try:
+                if isinstance(parent, Gtk.Box):
+                    try:
+                        parent.remove(unit)
+                    except Exception:
+                        pass
+                    if terminals_remain():
+                        return
                 self.close()
             except Exception:
                 pass
@@ -598,12 +648,26 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         if nb is not None and idx >= 0:
             page = nb.get_nth_page(idx)
             lbl = nb.get_tab_label(page)
+            updated = False
             if isinstance(lbl, Gtk.Box):
+                # Find first Gtk.Label child and update it
                 c = lbl.get_first_child()
-                if isinstance(c, Gtk.Label):
-                    c.set_label(title)
+                while c is not None:
+                    if isinstance(c, Gtk.Label):
+                        c.set_label(title)
+                        updated = True
+                        break
+                    c = c.get_next_sibling()
             elif isinstance(lbl, Gtk.Label):
                 lbl.set_label(title)
+                updated = True
+            # Fallback: if we couldn't update custom label, try using convenience API
+            if not updated:
+                try:
+                    if hasattr(nb, 'set_tab_label_text'):
+                        nb.set_tab_label_text(page, title)
+                except Exception:
+                    pass
 
     def refresh_shortcuts(self):
         # Remove all existing ShortcutControllers and reinstall from Config
@@ -642,6 +706,55 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         root_child = self.get_child()
         if root_child is not None:
             process_container(root_child)
+
+    def refresh_window_hints(self, always_on_top: bool, hide_from_taskbar: bool):
+        try:
+            if hasattr(self, 'set_keep_above'):
+                self.set_keep_above(bool(always_on_top))
+        except Exception:
+            pass
+
+    def refresh_titlebar_style(self):
+        # Build CSS for titlebar colors/fonts from profile settings
+        try:
+            from .config import Config
+            cfg = Config()
+            prof = cfg.get_profile_by_name(cfg.get_profile())
+        except Exception:
+            prof = {}
+        def sanitize(hexstr, fallback):
+            try:
+                s = str(hexstr or '').strip()
+                if s:
+                    return s
+            except Exception:
+                pass
+            return fallback
+        tx_fg = sanitize(prof.get('title_transmit_fg_color'), '#ffffff')
+        tx_bg = sanitize(prof.get('title_transmit_bg_color'), '#c80003')
+        rx_fg = sanitize(prof.get('title_receive_fg_color'), '#ffffff')
+        rx_bg = sanitize(prof.get('title_receive_bg_color'), '#0076c9')
+        in_fg = sanitize(prof.get('title_inactive_fg_color'), '#000000')
+        in_bg = sanitize(prof.get('title_inactive_bg_color'), '#c0bebf')
+        use_sys_font = bool(prof.get('title_use_system_font', True))
+        font_str = sanitize(prof.get('title_font'), 'Sans 9')
+        css_parts = []
+        css_parts.append(f".term-titlebar.tx {{ background-color: {tx_bg}; color: {tx_fg}; }}")
+        css_parts.append(f".term-titlebar.rx {{ background-color: {rx_bg}; color: {rx_fg}; }}")
+        css_parts.append(f".term-titlebar.inactive {{ background-color: {in_bg}; color: {in_fg}; }}")
+        if not use_sys_font and font_str:
+            # Apply font to the titlebar area; labels inherit
+            css_parts.append(f".term-titlebar {{ font: {font_str}; }}")
+        try:
+            data = ('\n'.join(css_parts)).encode('utf-8')
+            self._title_css_provider.load_from_data(data)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'set_skip_taskbar_hint'):
+                self.set_skip_taskbar_hint(bool(hide_from_taskbar))
+        except Exception:
+            pass
 
     def refresh_titlebar_position(self, bottom: bool):
         # Move titlebars to top/bottom within each unit
@@ -820,10 +933,10 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         dlg = Gtk.MessageDialog(transient_for=self, modal=True,
                                 message_type=Gtk.MessageType.QUESTION,
                                 buttons=Gtk.ButtonsType.NONE,
-                                text='Close window?')
-        dlg.format_secondary_text('There are multiple terminals open. Do you really want to close the window?')
-        dlg.add_button('Cancel', Gtk.ResponseType.CANCEL)
-        dlg.add_button('Close', Gtk.ResponseType.OK)
+                                text=_('Close window?'))
+        dlg.format_secondary_text(_('There are multiple terminals open. Do you really want to close the window?'))
+        dlg.add_button(_('Cancel'), Gtk.ResponseType.CANCEL)
+        dlg.add_button(_('Close'), Gtk.ResponseType.OK)
         def on_resp(d, resp):
             d.destroy()
             if resp == Gtk.ResponseType.OK:
@@ -852,6 +965,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         if term is not None:
             try:
                 term.copy_clipboard()
+            except Exception:
+                pass
+            # Clear selection after copy if configured
+            try:
+                from .config import Config
+                if bool(Config()['clear_select_on_copy']) and hasattr(term, 'unselect_all'):
+                    term.unselect_all()
             except Exception:
                 pass
         return True
@@ -1000,6 +1120,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
 
     def _make_tab_label_widget(self, text: str, page_widget: Gtk.Widget) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # Add a CSS class for GTK4 theming
+        try:
+            box.add_css_class('tab-label')
+        except Exception:
+            pass
         lbl = Gtk.Label(label=text)
         box.append(lbl)
         # Optional close button on tab
@@ -1032,7 +1157,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         pop.set_has_arrow(True)
         pop.set_autohide(True)
         # Point popover to the full tab label area
-        rect = Gtk.Rectangle()
+        from gi.repository import Gdk
+        rect = Gdk.Rectangle()
         rect.x = 0
         rect.y = 0
         rect.width = max(1, tab_label_widget.get_allocated_width())
@@ -1065,7 +1191,7 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         key = Gtk.EventControllerKey()
         from gi.repository import Gdk
         def on_key(_ctrl, keyval, keycode, state):
-            if keyval == Gdk.KEY_Return:
+            if keyval in (Gdk.KEY_Return, getattr(Gdk, 'KEY_KP_Enter', 0)):
                 commit()
                 return True
             if keyval == Gdk.KEY_Escape:
@@ -1074,6 +1200,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             return False
         key.connect('key-pressed', on_key)
         entry.add_controller(key)
+        # Also commit on entry.activate for reliability
+        try:
+            entry.connect('activate', lambda *_a: commit())
+        except Exception:
+            pass
         ok_btn.connect('clicked', lambda b: commit())
         pop.popup()
         entry.grab_focus()
@@ -1093,6 +1224,29 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         parent = unit.get_parent()
         # Build a new unit container for the new terminal (titlebar + scroller)
         new_term2, new_unit = self._new_terminal_container()
+        # Apply profile/group behavior per config/profile
+        try:
+            from .config import Config
+            cfg = Config()
+            # Always split with current profile
+            if bool(cfg['always_split_with_profile']):
+                try:
+                    prof = term.get_profile() if hasattr(term, 'get_profile') else None
+                    if prof:
+                        new_term2.set_profile(None, profile=prof)
+                except Exception:
+                    pass
+            # Split to group if profile requests
+            try:
+                p = term.config.get_profile_by_name(term.config.get_profile()) if hasattr(term, 'config') else {}
+                if p and bool(p.get('split_to_group', False)):
+                    grp = getattr(term, '_group', None)
+                    if grp:
+                        self._set_unit_group(new_unit, grp)
+            except Exception:
+                pass
+        except Exception:
+            pass
         paned = Gtk.Paned(orientation=orientation)
 
         # For Gtk.Box, remember insertion position before removing
@@ -1291,6 +1445,38 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     t = self._find_terminal_in_container(ch)
                     if t is not None:
                         return t
+        return None
+
+    def _count_terminals_in(self, container: Gtk.Widget) -> int:
+        from .gtk4terminal import Gtk4Terminal
+        count = 0
+        if isinstance(container, Gtk4Terminal):
+            return 1
+        if isinstance(container, Gtk.Box):
+            child = container.get_first_child()
+            while child is not None:
+                count += self._count_terminals_in(child)
+                child = child.get_next_sibling()
+        elif isinstance(container, Gtk.Paned):
+            for ch in (container.get_start_child(), container.get_end_child()):
+                if ch is not None:
+                    count += self._count_terminals_in(ch)
+        elif isinstance(container, Gtk.Notebook):
+            for i in range(container.get_n_pages()):
+                page = container.get_nth_page(i)
+                count += self._count_terminals_in(page)
+        return count
+
+    def _title_for_container(self, container: Gtk.Widget) -> str | None:
+        # Derive a title from the terminal inside the given container
+        try:
+            t = self._find_terminal_in_container(container)
+            if t is not None and hasattr(t, 'get_window_title'):
+                title = t.get_window_title()
+                if title:
+                    return title
+        except Exception:
+            pass
         return None
 
     def _on_cycle_focus(self, step: int):
@@ -1493,7 +1679,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     child.remove(existing)
                 self.set_child(notebook)
                 if existing is not None:
-                    notebook.append_page(existing, self._make_tab_label_widget("1", existing))
+                    title = self._title_for_container(existing) or "1"
+                    notebook.append_page(existing, self._make_tab_label_widget(title, existing))
             else:
                 existing = child
                 # Detach current child
@@ -1501,11 +1688,19 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 # Set notebook as the new child and append existing
                 self.set_child(notebook)
                 if existing is not None:
-                    notebook.append_page(existing, self._make_tab_label_widget("1", existing))
+                    title = self._title_for_container(existing) or "1"
+                    notebook.append_page(existing, self._make_tab_label_widget(title, existing))
 
         # Add new page (respect new_tab_after_current_tab)
         term, unit = self._new_terminal_container()
-        tab_lbl = self._make_tab_label_widget(str(notebook.get_n_pages()+1), unit)
+        # Title from terminal if available, else fallback to numeric
+        try:
+            new_title = term.get_window_title() if hasattr(term, 'get_window_title') else None
+        except Exception:
+            new_title = None
+        if not new_title:
+            new_title = str(notebook.get_n_pages()+1)
+        tab_lbl = self._make_tab_label_widget(new_title, unit)
         from .config import Config
         insert_after_current = False
         try:
@@ -1528,6 +1723,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         # Ensure focus returns to the new terminal, not the tab header
         try:
             term.grab_focus()
+        except Exception:
+            pass
+        # Update active tab CSS classes
+        try:
+            self._refresh_tab_label_active_classes(notebook, notebook.get_current_page())
         except Exception:
             pass
 
@@ -1553,6 +1753,10 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         # Focus terminal when tab is switched by any means
         def on_switched(nb, page, page_num):
             self._focus_terminal_in_page(nb, page_num)
+            try:
+                self._refresh_tab_label_active_classes(nb, page_num)
+            except Exception:
+                pass
         try:
             notebook.connect('switch-page', on_switched)
         except Exception:
@@ -1595,6 +1799,10 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     text = "1"
                 new_nb.append_page(widget, new_win._make_tab_label_widget(text, widget))
                 new_win.present()
+                try:
+                    new_win._refresh_tab_label_active_classes(new_nb, new_nb.get_current_page())
+                except Exception:
+                    pass
                 return new_nb
             notebook.connect('create-window', on_create_window)
         except Exception:
@@ -1606,6 +1814,27 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             t = self._find_terminal_in_container(page)
             if t is not None:
                 t.grab_focus()
+        except Exception:
+            pass
+
+    def _refresh_tab_label_active_classes(self, notebook: Gtk.Notebook, active_index: int):
+        try:
+            n = notebook.get_n_pages()
+            for i in range(n):
+                page = notebook.get_nth_page(i)
+                lbl = notebook.get_tab_label(page)
+                if isinstance(lbl, Gtk.Box):
+                    if i == active_index:
+                        try:
+                            lbl.add_css_class('active')
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            if hasattr(lbl, 'remove_css_class'):
+                                lbl.remove_css_class('active')
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1725,6 +1954,12 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             self._install_notebook_behaviors(widget)
             self._apply_notebook_prefs(widget)
         self.set_child(widget)
+        # Ensure tab active-state CSS classes are in sync
+        try:
+            if isinstance(widget, Gtk.Notebook):
+                self._refresh_tab_label_active_classes(widget, widget.get_current_page())
+        except Exception:
+            pass
         # Restore last active terminal focus if available
         try:
             last_uuid = layout_root.get('last_active_term')
