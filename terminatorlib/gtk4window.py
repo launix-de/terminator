@@ -60,6 +60,10 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             self._title_css_provider = Gtk.CssProvider()
             if disp is not None:
                 Gtk.StyleContext.add_provider_for_display(disp, self._title_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            # Provider to control paned handle size (from Config handle_size)
+            self._handle_css_provider = Gtk.CssProvider()
+            if disp is not None:
+                Gtk.StyleContext.add_provider_for_display(disp, self._handle_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         except Exception:
             pass
         # Initialize window hints and broadcast_default from config
@@ -77,9 +81,29 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     self.set_skip_taskbar_hint(bool(cfg['hide_from_taskbar']))
             except Exception:
                 pass
+            # Borderless window (no decorations) if supported
+            try:
+                if hasattr(self, 'set_decorated'):
+                    self.set_decorated(not bool(cfg['borderless']))
+            except Exception:
+                pass
+            # Sticky window (all workspaces) if supported
+            try:
+                sticky = bool(cfg['sticky'])
+                if sticky and hasattr(self, 'stick'):
+                    self.stick()
+                elif not sticky and hasattr(self, 'unstick'):
+                    self.unstick()
+            except Exception:
+                pass
             bd = (cfg['broadcast_default'] or 'group').lower()
             if bd in ('all', 'group', 'off'):
                 self._set_groupsend(bd)
+            # Apply handle size for pane separators
+            try:
+                self.refresh_handle_size(int(cfg['handle_size']))
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -121,7 +145,31 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             pass
 
     def on_child_exited(self, term, status):
-        # If there are multiple terminals, remove just this one; else close
+        # Respect profile exit_action: 'close' (default), 'hold', 'restart'
+        try:
+            prof = term.config.get_profile_by_name(term.config.get_profile()) if hasattr(term, 'config') else {}
+            action = str(prof.get('exit_action', 'close')).lower()
+        except Exception:
+            action = 'close'
+        if action == 'restart':
+            try:
+                # Respawn shell in the same cwd
+                cwd = term.get_cwd() if hasattr(term, 'get_cwd') else None
+                if hasattr(term, 'spawn_login_shell'):
+                    term.spawn_login_shell(cwd)
+                return
+            except Exception:
+                pass
+        if action == 'hold':
+            # Do not remove this terminal; leave content visible and mark held
+            try:
+                tb = unit.get_first_child() if isinstance(unit, Gtk.Box) else None
+                if hasattr(tb, 'set_held'):
+                    tb.set_held(True)
+            except Exception:
+                pass
+            return
+        # action == 'close': If there are multiple terminals, remove just this one; else close
         scroller = term.get_parent()
         unit = scroller.get_parent()  # our terminal container (titlebar + scroller)
         parent = unit.get_parent()
@@ -242,6 +290,18 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         term.set_vexpand(True)
         term.set_scroller(scroller)
         term.connect("child-exited", self.on_child_exited)
+        # Update title size on allocate
+        try:
+            def _on_alloc(w, alloc):
+                try:
+                    title = term.get_window_title() if hasattr(term, 'get_window_title') else ''
+                    if title:
+                        self._update_title_for_terminal(term, title)
+                except Exception:
+                    pass
+            term.connect('size-allocate', _on_alloc)
+        except Exception:
+            pass
         term.spawn_login_shell()
 
         # Titlebar container with controls
@@ -588,12 +648,15 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             'full_screen': self._on_full_screen,
             'new_window': self._on_new_window,
             'hide_window': self._on_hide_window,
-            'preferences_keybindings': self._on_preferences,
+            'rotate_cw': lambda *a: self._on_rotate(True),
+            'rotate_ccw': lambda *a: self._on_rotate(False),
+            'preferences_keybindings': self._on_preferences_keybindings,
             'preferences': self._on_preferences,
             'edit_window_title': self._on_edit_window_title,
             'edit_tab_title': self._on_edit_tab_title,
+            'edit_terminal_title': self._on_edit_terminal_title,
             'layout_launcher': self._on_layout_launcher,
-            'new_terminator': self._on_new_window,
+            'new_terminator': self._on_new_terminator,
             # Grouping/broadcast keybindings
             'create_group': lambda *a: self._on_create_group(),
             'group_all': lambda *a: self._group_all_window(),
@@ -612,6 +675,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             'move_tab_left': lambda *a: self._on_move_tab(-1),
             'next_profile': lambda *a: self._on_cycle_profile(1),
             'previous_profile': lambda *a: self._on_cycle_profile(-1),
+            'insert_number': lambda *a: self._on_insert_number(False),
+            'insert_padded': lambda *a: self._on_insert_number(True),
             'reset': self._on_reset_terminal,
             'reset_clear': self._on_reset_clear_terminal,
             'help': self._on_help,
@@ -642,6 +707,37 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         for key, callback in mapping.items():
             add_shortcut(cfg['keybindings'].get(key), callback)
 
+        # Fallback key handler for Alt+Arrow focus navigation when shortcut parsing/scope is ineffective
+        try:
+            keyctrl = Gtk.EventControllerKey()
+            from gi.repository import Gdk
+            def on_key(_c, keyval, keycode, state):
+                alt = False
+                try:
+                    alt = bool(state & Gdk.ModifierType.ALT_MASK)
+                except Exception:
+                    pass
+                if not alt:
+                    return False
+                if keyval == Gdk.KEY_Left:
+                    self._on_focus_direction('left'); return True
+                if keyval == Gdk.KEY_Right:
+                    self._on_focus_direction('right'); return True
+                if keyval == Gdk.KEY_Up:
+                    self._on_focus_direction('up'); return True
+                if keyval == Gdk.KEY_Down:
+                    self._on_focus_direction('down'); return True
+                return False
+            keyctrl.connect('key-pressed', on_key)
+            # Capture before child widgets (like VTE) consume it
+            try:
+                keyctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            except Exception:
+                pass
+            self.add_controller(keyctrl)
+        except Exception:
+            pass
+
     def _on_find(self, forward: bool):
         term = self._get_focused_terminal()
         if term is None:
@@ -669,6 +765,21 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             if hasattr(tb, 'set_title'):
                 try:
                     tb.set_title(title)
+                    # Update size text if available
+                    try:
+                        cols = getattr(term, 'get_column_count')()
+                        rows = getattr(term, 'get_row_count')()
+                        # Read size visibility from the current profile, matching GTK3
+                        show_size = True
+                        try:
+                            prof = term.config.get_profile_by_name(term.config.get_profile()) if hasattr(term, 'config') else {}
+                            show_size = not bool(prof.get('title_hide_sizetext', False))
+                        except Exception:
+                            pass
+                        if hasattr(tb, 'set_size'):
+                            tb.set_size(int(cols), int(rows), show=show_size)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             else:
@@ -752,6 +863,23 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         try:
             if hasattr(self, 'set_skip_taskbar_hint'):
                 self.set_skip_taskbar_hint(bool(hide_from_taskbar))
+        except Exception:
+            pass
+        # Borderless (decorations)
+        try:
+            from .config import Config
+            if hasattr(self, 'set_decorated'):
+                self.set_decorated(not bool(Config()['borderless']))
+        except Exception:
+            pass
+        # Update sticky hint according to current config value
+        try:
+            from .config import Config
+            sticky = bool(Config()['sticky'])
+            if sticky and hasattr(self, 'stick'):
+                self.stick()
+            elif not sticky and hasattr(self, 'unstick'):
+                self.unstick()
         except Exception:
             pass
 
@@ -856,6 +984,24 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         root = self.get_child()
         if root is not None:
             process_container(root)
+
+    def refresh_handle_size(self, size: int):
+        # Apply CSS to adjust Gtk.Paned separator size if size >= 0
+        try:
+            if size is None or int(size) < 0:
+                # Reset provider by loading empty CSS
+                self._handle_css_provider.load_from_data(b"")
+                return
+            # GTK4 separator node is 'separator' with style class 'pane-separator'
+            css = f"""
+            paned separator.pane-separator {{
+              min-width: {int(size)}px;
+              min-height: {int(size)}px;
+            }}
+            """.encode('utf-8')
+            self._handle_css_provider.load_from_data(css)
+        except Exception:
+            pass
 
     def _on_tab_next(self, *args):
         child = self.get_child()
@@ -970,7 +1116,19 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                                 message_type=Gtk.MessageType.QUESTION,
                                 buttons=Gtk.ButtonsType.NONE,
                                 text=_('Close window?'))
-        dlg.format_secondary_text(_('There are multiple terminals open. Do you really want to close the window?'))
+        # Secondary text in GTK4: place as extra child or content child
+        try:
+            if hasattr(dlg, 'set_extra_child'):
+                lb = Gtk.Label(label=_('There are multiple terminals open. Do you really want to close the window?'))
+                lb.set_wrap(True)
+                dlg.set_extra_child(lb)
+            else:
+                box = dlg.get_content_area()
+                lb = Gtk.Label(label=_('There are multiple terminals open. Do you really want to close the window?'))
+                lb.set_wrap(True)
+                box.append(lb)
+        except Exception:
+            pass
         dlg.add_button(_('Cancel'), Gtk.ResponseType.CANCEL)
         dlg.add_button(_('Close'), Gtk.ResponseType.OK)
         def on_resp(d, resp):
@@ -1000,14 +1158,39 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         term = self._get_focused_terminal()
         if term is not None:
             try:
-                term.copy_clipboard()
-            except Exception:
-                pass
-            # Clear selection after copy if configured
-            try:
+                # Smart copy behavior (match GTK3): if Ctrl+C and no selection and smart_copy=True,
+                # let the ^C reach the shell. Here we emulate by sending ETX to the child.
+                has_sel = False
+                try:
+                    if hasattr(term, 'get_has_selection'):
+                        has_sel = bool(term.get_has_selection())
+                except Exception:
+                    has_sel = False
                 from .config import Config
-                if bool(Config()['clear_select_on_copy']) and hasattr(term, 'unselect_all'):
-                    term.unselect_all()
+                smart = True
+                try:
+                    smart = bool(Config()['smart_copy'])
+                except Exception:
+                    smart = True
+                if not has_sel:
+                    if smart:
+                        # forward Ctrl+C to the child
+                        try:
+                            term.feed_child("\x03")
+                        except Exception:
+                            pass
+                        return True
+                    else:
+                        # swallow (do nothing)
+                        return True
+                # If we have selection, perform copy
+                term.copy_clipboard()
+                # Clear selection after copy if configured
+                try:
+                    if bool(Config()['clear_select_on_copy']) and hasattr(term, 'unselect_all'):
+                        term.unselect_all()
+                except Exception:
+                    pass
             except Exception:
                 pass
         return True
@@ -1032,11 +1215,21 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
 
     def _on_paste_selection(self, *args):
         term = self._get_focused_terminal()
-        if term is not None and hasattr(term, 'paste_primary'):  # Vte provides paste_primary
+        if term is not None:
             try:
-                term.paste_primary()
+                from .config import Config
+                cfg = Config()
+                # PuTTY paste style: choose source clipboard for selection-paste when requested
+                if bool(cfg['putty_paste_style_source_clipboard']):
+                    term.paste_clipboard()
+                    return True
             except Exception:
                 pass
+            if hasattr(term, 'paste_primary'):  # Vte provides paste_primary
+                try:
+                    term.paste_primary()
+                except Exception:
+                    pass
         return True
 
     def _on_search(self, *args):
@@ -1118,6 +1311,12 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         dlg.present()
         return True
 
+    def _on_preferences_keybindings(self, *args):
+        from .preferences_gtk4 import PreferencesWindow
+        dlg = PreferencesWindow(parent=self, initial_page='Keybindings')
+        dlg.present()
+        return True
+
     def _on_edit_window_title(self, *args):
         # Reuse the terminal action by invoking its handler if possible
         term = self._get_focused_terminal()
@@ -1163,6 +1362,70 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             label = new_widget
         # Show popover anchored to the tab label
         self._show_tab_rename_popover(label, page)
+        return True
+
+    def _on_edit_terminal_title(self, *args):
+        # Inline edit of the per-terminal titlebar label (does not change VTE title)
+        term = self._get_focused_terminal()
+        if term is None:
+            return True
+        scroller = term.get_parent()
+        unit = scroller.get_parent() if scroller is not None else None
+        if unit is None:
+            return True
+        tb = unit.get_first_child() if isinstance(unit, Gtk.Box) else None
+        if not isinstance(tb, Gtk.Box) or 'term-titlebar' not in tb.get_css_classes():
+            return True
+        # Find a label child on the titlebar to anchor a popover editor
+        title_label = None
+        child = tb.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Label) and child.get_hexpand():
+                title_label = child
+                break
+            child = child.get_next_sibling()
+        anchor = title_label or tb
+        pop = Gtk.Popover()
+        pop.set_parent(anchor)
+        pop.set_has_arrow(True)
+        pop.set_autohide(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        entry = Gtk.Entry()
+        try:
+            if title_label is not None:
+                entry.set_text(title_label.get_label() or '')
+        except Exception:
+            pass
+        box.append(entry)
+        ok_btn = Gtk.Button(label="OK")
+        box.append(ok_btn)
+        pop.set_child(box)
+
+        def commit():
+            txt = entry.get_text().strip()
+            # Update titlebar
+            if title_label is not None:
+                title_label.set_label(txt)
+            # Update tab label if present
+            nb, idx = self._find_notebook_page_for_widget(unit)
+            if nb is not None and idx >= 0:
+                page = nb.get_nth_page(idx)
+                lbl = nb.get_tab_label(page)
+                if isinstance(lbl, Gtk.Box):
+                    c = lbl.get_first_child()
+                    if isinstance(c, Gtk.Label):
+                        c.set_label(txt)
+                elif isinstance(lbl, Gtk.Label):
+                    lbl.set_label(txt)
+            pop.popdown()
+
+        ok_btn.connect('clicked', lambda *_a: commit())
+        key = Gtk.EventControllerKey()
+        from gi.repository import Gdk
+        key.connect('key-pressed', lambda _c, kv, kc, st: (commit() or True) if kv in (Gdk.KEY_Return, getattr(Gdk, 'KEY_KP_Enter', 0)) else (pop.popdown() or True) if kv == Gdk.KEY_Escape else False)
+        entry.add_controller(key)
+        pop.popup()
+        entry.grab_focus()
         return True
 
     def _make_tab_label_widget(self, text: str, page_widget: Gtk.Widget) -> Gtk.Widget:
@@ -1530,6 +1793,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     t = self._find_terminal_in_container(ch)
                     if t is not None:
                         return t
+        elif isinstance(container, Gtk.ScrolledWindow):
+            try:
+                ch = container.get_child()
+                if ch is not None:
+                    return self._find_terminal_in_container(ch)
+            except Exception:
+                pass
         return None
 
     def _count_terminals_in(self, container: Gtk.Widget) -> int:
@@ -1546,6 +1816,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             for ch in (container.get_start_child(), container.get_end_child()):
                 if ch is not None:
                     count += self._count_terminals_in(ch)
+        elif isinstance(container, Gtk.ScrolledWindow):
+            try:
+                ch = container.get_child()
+                if ch is not None:
+                    count += self._count_terminals_in(ch)
+            except Exception:
+                pass
         elif isinstance(container, Gtk.Notebook):
             for i in range(container.get_n_pages()):
                 page = container.get_nth_page(i)
@@ -1731,6 +2008,54 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         except Exception:
             pass
 
+    def _on_new_terminator(self, *args):
+        # Spawn a new Terminator process (parity with GTK3 key_new_terminator)
+        try:
+            from .util import spawn_new_terminator
+            cwd = None
+            t = self._get_focused_terminal()
+            if t is not None and hasattr(t, 'get_cwd'):
+                cwd = t.get_cwd() or None
+            spawn_new_terminator(cwd or '.', ['-u'])
+        except Exception:
+            # Fallback: open a new app window if spawning fails
+            self._on_new_window()
+        return True
+
+    def _on_rotate(self, clockwise: bool):
+        # Rotate among siblings: if in a notebook, rotate page order; if in a paned, swap children
+        term = self._get_focused_terminal()
+        if term is None:
+            return True
+        unit = term.get_parent().get_parent() if term.get_parent() else None
+        if unit is None:
+            return True
+        parent = unit.get_parent()
+        if isinstance(parent, Gtk.Notebook):
+            n = parent.get_n_pages()
+            if n <= 1:
+                return True
+            cur = parent.get_current_page()
+            new = (cur + 1) % n if clockwise else (cur - 1 + n) % n
+            page = parent.get_nth_page(cur)
+            label = parent.get_tab_label(page)
+            parent.remove_page(cur)
+            parent.insert_page(page, label, new)
+            parent.set_current_page(new)
+            return True
+        if isinstance(parent, Gtk.Paned):
+            a = parent.get_start_child()
+            b = parent.get_end_child()
+            if a is None or b is None:
+                return True
+            # Swap children; when clockwise, move focused unit to the next position
+            # Effectively, swap start/end
+            parent.set_start_child(None)
+            parent.set_end_child(None)
+            parent.set_start_child(b)
+            parent.set_end_child(a)
+            return True
+        return True
     
 
     def zoom_terminal(self, term: Gtk4Terminal):
@@ -2372,6 +2697,51 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         nb.set_current_page(new)
         return True
 
+    def _on_insert_number(self, padded: bool):
+        # Insert terminal index for target terms based on broadcast mode
+        # Build ordered terminal list for this window
+        terms_order = []
+        for unit in self._iter_units_in_container(self.get_child()):
+            t = self._find_terminal_in_container(unit)
+            if t is not None:
+                terms_order.append(t)
+        if not terms_order:
+            return True
+        # Determine target set per broadcast mode
+        from .terminator import Terminator
+        tman = Terminator()
+        try:
+            rev = {v: k for k, v in tman.groupsend_type.items()}
+            mode = rev.get(getattr(tman, 'groupsend', tman.groupsend_type.get('off')), 'off')
+        except Exception:
+            mode = 'off'
+        focused = self._get_focused_terminal()
+        targets = []
+        if focused is None:
+            pass
+        elif mode == 'all':
+            targets = list(terms_order)
+        elif mode == 'group':
+            grp = getattr(focused, '_group', None)
+            targets = [x for x in terms_order if getattr(x, '_group', None) == grp and grp is not None]
+            if not targets:
+                targets = [focused]
+        else:
+            targets = [focused]
+        # Compute width for padding
+        width = len(str(len(terms_order))) if padded else 0
+        for term in targets:
+            try:
+                idx = terms_order.index(term)
+            except ValueError:
+                continue
+            s = f"{idx+1:0{width}d}" if padded else str(idx + 1)
+            try:
+                term.feed_child(s)
+            except Exception:
+                pass
+        return True
+
     def refresh_tab_close_buttons(self):
         # Update existing tab label widgets to add or remove close buttons based on preference
         from .config import Config
@@ -2467,10 +2837,47 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         tb = unit.get_first_child() if isinstance(unit, Gtk.Box) else None
         if tb is None:
             return
-        # Show bell for 1s
         try:
-            if hasattr(tb, 'show_bell'):
+            # Profile-controlled bell behavior
+            prof = term.config.get_profile_by_name(term.config.get_profile()) if hasattr(term, 'config') else {}
+        except Exception:
+            prof = {}
+        icon_bell = bool(prof.get('icon_bell', True))
+        visible_bell = bool(prof.get('visible_bell', False))
+        urgent_bell = bool(prof.get('urgent_bell', False))
+        # Icon bell: show briefly
+        try:
+            if icon_bell and hasattr(tb, 'show_bell'):
                 tb.show_bell()
                 GLib.timeout_add(1000, lambda: (tb.hide_bell(), False)[1])
+        except Exception:
+            pass
+        # Visible bell: brief flash class on titlebar
+        try:
+            if visible_bell and hasattr(tb, 'add_css_class'):
+                tb.add_css_class('bell')
+                def _clear():
+                    try:
+                        if hasattr(tb, 'remove_css_class'):
+                            tb.remove_css_class('bell')
+                    except Exception:
+                        pass
+                    return False
+                GLib.timeout_add(150, _clear)
+        except Exception:
+            pass
+        # Urgent bell: request attention if supported
+        try:
+            if urgent_bell and hasattr(self, 'set_urgency_hint'):
+                self.set_urgency_hint(True)
+                # Clear on focus
+                def _clear_urgency():
+                    try:
+                        self.set_urgency_hint(False)
+                    except Exception:
+                        pass
+                    return False
+                # Clear soon after to avoid sticky hint
+                GLib.timeout_add(1500, _clear_urgency)
         except Exception:
             pass

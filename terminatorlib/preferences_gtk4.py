@@ -17,7 +17,7 @@ from .plugin import PluginRegistry
 
 
 class PreferencesWindow(Gtk.Dialog):
-    def __init__(self, parent: Gtk.Window | None = None):
+    def __init__(self, parent: Gtk.Window | None = None, initial_page: str | None = None):
         super().__init__(title=_("Preferences"), transient_for=parent, modal=True)
         # Use a smaller default size and allow scrolling inside tabs
         self.set_default_size(640, 440)
@@ -723,6 +723,43 @@ class PreferencesWindow(Gtk.Dialog):
         btn_row.append(btn_remove_layout)
         left_box.append(btn_row)
 
+        # Double-click (row-activated) to rename layout (matches GTK3 inline edit intent)
+        def _prompt_rename(old_name: str):
+            if not old_name or old_name == 'default':
+                return
+            dlg = Gtk.Dialog(title=_("Rename Layout"), transient_for=self, modal=True)
+            box = dlg.get_content_area(); box.set_spacing(8)
+            entry = Gtk.Entry(); entry.set_text(old_name); box.append(entry)
+            dlg.add_button(_("Cancel"), Gtk.ResponseType.CANCEL)
+            dlg.add_button(_("Rename"), Gtk.ResponseType.OK)
+            dlg.show()
+            def on_resp(d, resp):
+                if resp == Gtk.ResponseType.OK:
+                    new = entry.get_text().strip()
+                    if new and new != old_name:
+                        try:
+                            self.config.rename_layout(old_name, new)
+                            self.config.save()
+                            _refresh_layouts_list()
+                            # Reselect renamed
+                            r = self.layouts_list.get_first_child()
+                            while r is not None:
+                                if getattr(r, '_name', None) == new:
+                                    self.layouts_list.select_row(r)
+                                    break
+                                r = r.get_next_sibling()
+                        except Exception:
+                            pass
+                d.destroy()
+            dlg.connect('response', on_resp)
+            dlg.present()
+
+        def on_layout_row_activated(listbox, row):
+            name = getattr(row, '_name', None)
+            if name:
+                _prompt_rename(name)
+        self.layouts_list.connect('row-activated', on_layout_row_activated)
+
         def on_remove_layout(_b):
             row = self.layouts_list.get_selected_row()
             if not row:
@@ -1089,6 +1126,17 @@ class PreferencesWindow(Gtk.Dialog):
                 notebook.append_page(self._pref_page_keybindings, Gtk.Label(label=_("Keybindings")))
             if hasattr(self, '_pref_page_plugins'):
                 notebook.append_page(self._pref_page_plugins, Gtk.Label(label=_("Plugins")))
+            # Select requested initial page by label
+            if initial_page:
+                try:
+                    n = notebook.get_n_pages()
+                    for i in range(n):
+                        tab = notebook.get_tab_label(notebook.get_nth_page(i))
+                        if hasattr(tab, 'get_label') and tab.get_label() == _(initial_page):
+                            notebook.set_current_page(i)
+                            break
+                except Exception:
+                    pass
         except Exception:
             pass
 

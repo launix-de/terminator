@@ -56,6 +56,22 @@ class Gtk4Terminal(Vte.Terminal):
             self.connect('window-title-changed', self._on_window_title_changed)
         except Exception:
             pass
+
+    # Compatibility hook for GTK3-era plugins that call terminal.emit('insert-term-name')
+    def emit(self, detailed_signal, *args):  # type: ignore[override]
+        try:
+            # Handle common custom signals expected by plugins
+            if detailed_signal == 'insert-term-name':
+                from .terminator import Terminator as _Term
+                _Term().do_insert_term_name(self)
+                return None
+        except Exception:
+            pass
+        # Fallback to default GObject emit for real signals
+        try:
+            return super().emit(detailed_signal, *args)  # type: ignore[attr-defined]
+        except Exception:
+            return None
         # Some shells/apps use icon-title; update on that as well
         try:
             self.connect('icon-title-changed', self._on_window_title_changed)
@@ -76,6 +92,15 @@ class Gtk4Terminal(Vte.Terminal):
                     self._copy_on_sel_handler = self.connect('selection-changed', self._on_selection_changed_copy)
                 except Exception:
                     self._copy_on_sel_handler = None
+        except Exception:
+            pass
+        # Scroll behavior from profile
+        try:
+            self.set_scroll_on_output(bool(self.config['scroll_on_output']))
+        except Exception:
+            pass
+        try:
+            self.set_scroll_on_keystroke(bool(self.config['scroll_on_keystroke']))
         except Exception:
             pass
         # Track selection to enable/disable copy actions live
@@ -386,9 +411,32 @@ class Gtk4Terminal(Vte.Terminal):
         else:
             shell = _find_user_shell()
             argv = [shell]
+            # GTK3 behavior: make it a login shell. Prefer -l, else prefix '-' to argv[0]
             if login_shell:
-                argv.append('-l')
-        envv = [f"{k}={v}" for k, v in os.environ.items()]
+                try:
+                    argv.append('-l')
+                except Exception:
+                    pass
+        # Environment variables: ensure TERM/COLORTERM and PWD are set per profile/cwd
+        env = dict(os.environ)
+        try:
+            termv = prof.get('term')
+            if termv:
+                env['TERM'] = str(termv)
+        except Exception:
+            pass
+        try:
+            colv = prof.get('colorterm')
+            if colv:
+                env['COLORTERM'] = str(colv)
+        except Exception:
+            pass
+        try:
+            if cwd:
+                env['PWD'] = cwd
+        except Exception:
+            pass
+        envv = [f"{k}={v}" for k, v in env.items()]
 
         def _on_spawned(*cb_args):
             try:
@@ -653,6 +701,12 @@ class Gtk4Terminal(Vte.Terminal):
 
         # Toggle scrollbar (hide both bars and disable overlay when off)
         sb_initial = True
+        try:
+            if self._scroller is not None:
+                hp, vp = self._scroller.get_policy()
+                sb_initial = not (hp == Gtk.PolicyType.NEVER and vp == Gtk.PolicyType.NEVER)
+        except Exception:
+            pass
         act_sb = Gio.SimpleAction.new_stateful("toggle_scrollbar", None, GLib.Variant('b', sb_initial))
         def on_sb(action, value):
             action.set_state(value)
@@ -814,6 +868,26 @@ class Gtk4Terminal(Vte.Terminal):
         add_simple_action('paste_selection', lambda *a: win_call('_on_paste_selection') and win_call('_on_paste_selection')())
         add_simple_action('reset', lambda *a: win_call('_on_reset_terminal') and win_call('_on_reset_terminal')())
         add_simple_action('reset_clear', lambda *a: win_call('_on_reset_clear_terminal') and win_call('_on_reset_clear_terminal')())
+        # Paste (respect PuTTY paste style preference)
+        if self._action_group.lookup_action('paste') is not None:
+            act_paste = self._action_group.lookup_action('paste')
+            def on_paste(_a, _p):
+                try:
+                    from .config import Config as _Cfg
+                    cfg = _Cfg()
+                    if bool(cfg['putty_paste_style_source_clipboard']):
+                        self.paste_clipboard(); return
+                    if bool(cfg['putty_paste_style']):
+                        if hasattr(self, 'paste_primary'):
+                            self.paste_primary(); return
+                except Exception:
+                    pass
+                self.paste_clipboard()
+            # Disconnect previous activate and rebind
+            try:
+                act_paste.connect('activate', on_paste)
+            except Exception:
+                pass
         add_simple_action('full_screen', lambda *a: win_call('_on_full_screen') and win_call('_on_full_screen')())
         add_simple_action('new_window', lambda *a: win_call('_on_new_window') and win_call('_on_new_window')())
         add_simple_action('hide_window', lambda *a: win_call('_on_hide_window') and win_call('_on_hide_window')())
@@ -1418,6 +1492,15 @@ class Gtk4Terminal(Vte.Terminal):
                 self.set_scrollback_lines(int(prof.get('scrollback_lines', 500)))
         except Exception:
             pass
+        # Scroll on output/keystroke
+        try:
+            self.set_scroll_on_output(bool(prof.get('scroll_on_output', False)))
+        except Exception:
+            pass
+        try:
+            self.set_scroll_on_keystroke(bool(prof.get('scroll_on_keystroke', True)))
+        except Exception:
+            pass
 
         # Cursor
         try:
@@ -1444,6 +1527,69 @@ class Gtk4Terminal(Vte.Terminal):
         try:
             if hasattr(self, 'set_bold_is_bright'):
                 self.set_bold_is_bright(bool(prof.get('bold_is_bright', False)))
+        except Exception:
+            pass
+
+        # Word character exceptions
+        try:
+            wc = prof.get('word_chars')
+            if wc and hasattr(self, 'set_word_char_exceptions'):
+                self.set_word_char_exceptions(str(wc))
+        except Exception:
+            pass
+
+        # Mouse autohide
+        try:
+            if hasattr(self, 'set_mouse_autohide'):
+                self.set_mouse_autohide(bool(prof.get('mouse_autohide', True)))
+        except Exception:
+            pass
+
+        # Backspace/Delete bindings
+        try:
+            bmap = prof.get('backspace_binding', 'auto')
+            dmap = prof.get('delete_binding', 'auto')
+            def map_binding(name):
+                # Try GTK3-style constants first, then VTE 3.91 enums
+                try:
+                    if name == 'ascii-del':
+                        return getattr(Vte, 'ERASE_ASCII_DELETE')
+                    if name == 'control-h':
+                        return getattr(Vte, 'ERASE_ASCII_BACKSPACE')
+                    if name == 'escape-sequence':
+                        return getattr(Vte, 'ERASE_DELETE_SEQUENCE')
+                    return getattr(Vte, 'ERASE_AUTO')
+                except Exception:
+                    try:
+                        eb = getattr(Vte, 'EraseBinding')
+                        if name == 'ascii-del':
+                            return getattr(eb, 'ASCII_DELETE')
+                        if name == 'control-h':
+                            return getattr(eb, 'ASCII_BACKSPACE')
+                        if name == 'escape-sequence':
+                            return getattr(eb, 'DELETE_SEQUENCE')
+                        return getattr(eb, 'AUTO')
+                    except Exception:
+                        return None
+            bb = map_binding(bmap)
+            db = map_binding(dmap)
+            try:
+                if bb is not None and hasattr(self, 'set_backspace_binding'):
+                    self.set_backspace_binding(bb)
+            except Exception:
+                pass
+            try:
+                if db is not None and hasattr(self, 'set_delete_binding'):
+                    self.set_delete_binding(db)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Bells
+        try:
+            if hasattr(self, 'set_audible_bell'):
+                self.set_audible_bell(bool(prof.get('audible_bell', False)))
         except Exception:
             pass
 

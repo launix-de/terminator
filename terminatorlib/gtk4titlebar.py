@@ -42,10 +42,21 @@ class Gtk4Titlebar(Gtk.Box):
         self._group_label.add_css_class('dim-label')
         self.append(self._group_label)
 
+        # Held-open indicator (optional, hidden by default)
+        self._held = Gtk.Label(label='', xalign=0)
+        self._held.add_css_class('dim-label')
+        self._held.set_visible(False)
+        self.append(self._held)
+
         # Title label expands
         self._title = Gtk.Label(label='Terminal', xalign=0)
         self._title.set_hexpand(True)
         self.append(self._title)
+
+        # Size label (cols x rows), dimmed
+        self._size = Gtk.Label(label='', xalign=0)
+        self._size.add_css_class('dim-label')
+        self.append(self._size)
 
         # Bell icon (hidden by default)
         self._bell = Gtk.Image.new_from_icon_name('dialog-warning-symbolic')
@@ -69,6 +80,12 @@ class Gtk4Titlebar(Gtk.Box):
     # External API
     def set_title(self, text: str):
         self._title.set_label(text)
+    def set_size(self, cols: int | None, rows: int | None, show: bool = True):
+        if show and cols and rows and cols > 0 and rows > 0:
+            self._size.set_label(f" {cols}x{rows}")
+            self._size.set_visible(True)
+        else:
+            self._size.set_visible(False)
 
     def show_bell(self):
         self._bell.set_visible(True)
@@ -108,6 +125,14 @@ class Gtk4Titlebar(Gtk.Box):
                 self.remove_css_class(cls)
         if state in ('tx', 'rx', 'inactive'):
             self.add_css_class(state)
+
+    def set_held(self, held: bool):
+        if held:
+            from .translation import _
+            self._held.set_label(_('[INACTIVE: Right-Click for Relaunch option] '))
+            self._held.set_visible(True)
+        else:
+            self._held.set_visible(False)
 
     # Internal callbacks
     def _on_pressed(self, gesture, n_press, x, y):
