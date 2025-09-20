@@ -166,6 +166,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 tb = unit.get_first_child() if isinstance(unit, Gtk.Box) else None
                 if hasattr(tb, 'set_held'):
                     tb.set_held(True)
+                # Mark terminal held for popup menu relaunch
+                try:
+                    setattr(term, '_is_held_open', True)
+                except Exception:
+                    pass
             except Exception:
                 pass
             return
@@ -235,9 +240,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                     grand.remove_page(idx)
                     grand.insert_page(other, label, idx)
                     grand.set_current_page(idx)
-            # If any terminals remain, don't close the window
-            if terminals_remain():
-                return
+            # Replacement is done; regardless of interim count, keep window open
+            return
         elif isinstance(parent, Gtk.Notebook):
             # Remove just this tab; keep window open if other tabs remain
             idx = -1
@@ -270,7 +274,7 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             except Exception:
                 pass
 
-    def _new_terminal_container(self):
+    def _new_terminal_container(self, spawn_cwd: str | None = None, auto_spawn: bool = True):
         from .config import Config
         cfg = Config()
         term = Gtk4Terminal()
@@ -289,6 +293,19 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         term.set_hexpand(True)
         term.set_vexpand(True)
         term.set_scroller(scroller)
+        # Apply scrollbar position (left/right) based on profile
+        try:
+            from .config import Config as _Cfg
+            cfg2 = _Cfg()
+            prof = cfg2.get_profile_by_name(cfg2.get_profile())
+            pos = str(prof.get('scrollbar_position', 'right')).lower()
+            if hasattr(scroller, 'set_direction'):
+                if pos == 'left':
+                    scroller.set_direction(Gtk.TextDirection.RTL)
+                else:
+                    scroller.set_direction(Gtk.TextDirection.LTR)
+        except Exception:
+            pass
         term.connect("child-exited", self.on_child_exited)
         # Update title size on allocate
         try:
@@ -302,7 +319,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             term.connect('size-allocate', _on_alloc)
         except Exception:
             pass
-        term.spawn_login_shell()
+        if auto_spawn:
+            term.spawn_login_shell(spawn_cwd)
 
         # Titlebar container with controls
         titlebar = Gtk4Titlebar(self, None)  # unit set after unit is constructed
@@ -622,6 +640,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             'prev_tab': self._on_tab_prev,
             'cycle_next': lambda *a: self._on_cycle_focus(1),
             'cycle_prev': lambda *a: self._on_cycle_focus(-1),
+            'go_next': lambda *a: self._on_cycle_focus(1),
+            'go_prev': lambda *a: self._on_cycle_focus(-1),
             'new_tab': self._on_new_tab,
             'split_horiz': lambda *a: self._on_split(Gtk.Orientation.HORIZONTAL),
             'split_vert': lambda *a: self._on_split(Gtk.Orientation.VERTICAL),
@@ -854,6 +874,50 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         if root_child is not None:
             process_container(root_child)
 
+    def refresh_title_sizes(self):
+        # Iterate all terminals and refresh their size label visibility and value
+        def visit(container):
+            from .gtk4terminal import Gtk4Terminal
+            if isinstance(container, Gtk.Box):
+                # Titlebar + scroller unit
+                first = container.get_first_child()
+                if isinstance(first, Gtk.Box) and 'term-titlebar' in first.get_css_classes():
+                    # Find terminal under this unit
+                    scroller = first.get_next_sibling()
+                    term = None
+                    try:
+                        if isinstance(scroller, Gtk.ScrolledWindow):
+                            v = scroller.get_child()
+                            if isinstance(v, Gtk4Terminal):
+                                term = v
+                    except Exception:
+                        term = None
+                    if term is not None and hasattr(first, 'set_size'):
+                        try:
+                            cols = getattr(term, 'get_column_count')()
+                            rows = getattr(term, 'get_row_count')()
+                            prof = term.config.get_profile_by_name(term.config.get_profile()) if hasattr(term, 'config') else {}
+                            show_size = not bool(prof.get('title_hide_sizetext', False))
+                            first.set_size(int(cols), int(rows), show=show_size)
+                        except Exception:
+                            pass
+                # Recurse
+                c = container.get_first_child()
+                while c is not None:
+                    visit(c)
+                    c = c.get_next_sibling()
+            elif isinstance(container, Gtk.Paned):
+                if container.get_start_child() is not None:
+                    visit(container.get_start_child())
+                if container.get_end_child() is not None:
+                    visit(container.get_end_child())
+            elif isinstance(container, Gtk.Notebook):
+                for i in range(container.get_n_pages()):
+                    visit(container.get_nth_page(i))
+        root = self.get_child()
+        if root is not None:
+            visit(root)
+
     def refresh_window_hints(self, always_on_top: bool, hide_from_taskbar: bool):
         try:
             if hasattr(self, 'set_keep_above'):
@@ -891,7 +955,7 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             prof = cfg.get_profile_by_name(cfg.get_profile())
         except Exception:
             prof = {}
-        def sanitize(hexstr, fallback):
+        def parsec(hexstr, fallback):
             try:
                 s = str(hexstr or '').strip()
                 if s:
@@ -899,14 +963,41 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             except Exception:
                 pass
             return fallback
-        tx_fg = sanitize(prof.get('title_transmit_fg_color'), '#ffffff')
-        tx_bg = sanitize(prof.get('title_transmit_bg_color'), '#c80003')
-        rx_fg = sanitize(prof.get('title_receive_fg_color'), '#ffffff')
-        rx_bg = sanitize(prof.get('title_receive_bg_color'), '#0076c9')
-        in_fg = sanitize(prof.get('title_inactive_fg_color'), '#000000')
-        in_bg = sanitize(prof.get('title_inactive_bg_color'), '#c0bebf')
+        def hex_to_rgb(h):
+            try:
+                h = h.lstrip('#')
+                if len(h) == 6:
+                    return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+            except Exception:
+                return None
+        def rgb_to_hex(r,g,b):
+            return f"#{max(0,min(255,r)):02x}{max(0,min(255,g)):02x}{max(0,min(255,b)):02x}"
+        def scale_hex(col, factor):
+            rgb = hex_to_rgb(col)
+            if not rgb:
+                return col
+            r,g,b = rgb
+            return rgb_to_hex(int(r*factor), int(g*factor), int(b*factor))
+
+        tx_fg = parsec(prof.get('title_transmit_fg_color'), '#ffffff')
+        tx_bg = parsec(prof.get('title_transmit_bg_color'), '#c80003')
+        rx_fg = parsec(prof.get('title_receive_fg_color'), '#ffffff')
+        rx_bg = parsec(prof.get('title_receive_bg_color'), '#0076c9')
+        in_fg = parsec(prof.get('title_inactive_fg_color'), '')
+        in_bg = parsec(prof.get('title_inactive_bg_color'), '')
+        # Derive inactive colors if not set, using global offsets
+        if not in_fg or not in_bg:
+            try:
+                off_fg = float(cfg['inactive_color_offset']) or 0.8
+                off_bg = float(cfg['inactive_bg_color_offset']) or 1.0
+            except Exception:
+                off_fg, off_bg = 0.8, 1.0
+            if not in_fg:
+                in_fg = scale_hex(tx_fg, off_fg)
+            if not in_bg:
+                in_bg = scale_hex(tx_bg, off_bg)
         use_sys_font = bool(prof.get('title_use_system_font', True))
-        font_str = sanitize(prof.get('title_font'), 'Sans 9')
+        font_str = parsec(prof.get('title_font'), 'Sans 9')
         css_parts = []
         css_parts.append(f".term-titlebar.tx {{ background-color: {tx_bg}; color: {tx_fg}; }}")
         css_parts.append(f".term-titlebar.rx {{ background-color: {rx_bg}; color: {rx_fg}; }}")
@@ -1533,7 +1624,14 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         unit = scroller.get_parent()
         parent = unit.get_parent()
         # Build a new unit container for the new terminal (titlebar + scroller)
-        new_term2, new_unit = self._new_terminal_container()
+        # Spawn using the current terminal's cwd to match GTK3 behavior
+        cwd = None
+        try:
+            if hasattr(term, 'get_cwd'):
+                cwd = term.get_cwd() or None
+        except Exception:
+            cwd = None
+        new_term2, new_unit = self._new_terminal_container(spawn_cwd=cwd, auto_spawn=False)
         # Apply profile/group behavior per config/profile
         try:
             from .config import Config
@@ -1656,6 +1754,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         else:
             self.set_child(paned)
 
+        # Now spawn the shell for the new terminal with desired cwd and focus it
+        try:
+            new_term2.spawn_login_shell(cwd)
+        except Exception:
+            pass
         new_term2.grab_focus()
 
     def _on_switch_to_tab(self, index: int):

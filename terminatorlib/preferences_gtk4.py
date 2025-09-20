@@ -46,6 +46,22 @@ class PreferencesWindow(Gtk.Dialog):
         self.chk_hide_taskbar.set_active(self.config['hide_from_taskbar'])
         general_box.append(self.chk_hide_taskbar)
 
+        # Borderless / Sticky
+        row_window = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_borderless = Gtk.CheckButton(label=_("Borderless window (no decorations)"))
+        try:
+            self.chk_borderless.set_active(bool(self.config['borderless']))
+        except Exception:
+            self.chk_borderless.set_active(False)
+        row_window.append(self.chk_borderless)
+        self.chk_sticky = Gtk.CheckButton(label=_("Stick window to all workspaces"))
+        try:
+            self.chk_sticky.set_active(bool(self.config['sticky']))
+        except Exception:
+            self.chk_sticky.set_active(False)
+        row_window.append(self.chk_sticky)
+        general_box.append(row_window)
+
         self.chk_show_titlebar = Gtk.CheckButton(label=_("Show titlebar above terminals"))
         # Some configs may miss the key; default True
         try:
@@ -75,6 +91,19 @@ class PreferencesWindow(Gtk.Dialog):
         except Exception:
             self.chk_disable_mouse_paste.set_active(False)
         row_clip.append(self.chk_disable_mouse_paste)
+        # PuTTY paste style options
+        self.chk_putty_paste = Gtk.CheckButton(label=_("Use PuTTY paste style (prefer selection)"))
+        try:
+            self.chk_putty_paste.set_active(bool(self.config['putty_paste_style']))
+        except Exception:
+            self.chk_putty_paste.set_active(False)
+        row_clip.append(self.chk_putty_paste)
+        self.chk_putty_clip = Gtk.CheckButton(label=_("Use clipboard as paste source"))
+        try:
+            self.chk_putty_clip.set_active(bool(self.config['putty_paste_style_source_clipboard']))
+        except Exception:
+            self.chk_putty_clip.set_active(False)
+        row_clip.append(self.chk_putty_clip)
         general_box.append(row_clip)
 
         # Window focus behavior
@@ -189,6 +218,18 @@ class PreferencesWindow(Gtk.Dialog):
             self.chk_split_with_profile.set_active(False)
         row_split.append(self.chk_split_with_profile)
         general_box.append(row_split)
+
+        # Split handle size
+        row_handle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_handle.append(Gtk.Label(label=_("Split handle size (px, -1 default)"), xalign=0))
+        adj_h = Gtk.Adjustment(lower=-1, upper=64, step_increment=1, page_increment=4)
+        self.spin_handle = Gtk.SpinButton(adjustment=adj_h, climb_rate=1.0, digits=0)
+        try:
+            self.spin_handle.set_value(float(self.config['handle_size']))
+        except Exception:
+            self.spin_handle.set_value(-1)
+        row_handle.append(self.spin_handle)
+        general_box.append(row_handle)
 
         # Search options
         row_search = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -485,6 +526,16 @@ class PreferencesWindow(Gtk.Dialog):
         row_render.append(self.chk_use_theme_colors)
         prof_box.append(row_render)
 
+        # Split to group (profile)
+        row_split_grp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_split_to_group = Gtk.CheckButton(label=_("Split new terminals to the same group"))
+        try:
+            self.chk_split_to_group.set_active(bool(self.config['split_to_group']))
+        except Exception:
+            self.chk_split_to_group.set_active(False)
+        row_split_grp.append(self.chk_split_to_group)
+        prof_box.append(row_split_grp)
+
         # Cursor colors
         row_cursors = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.chk_cursor_default = Gtk.CheckButton(label=_("Use default cursor colors"))
@@ -692,6 +743,15 @@ class PreferencesWindow(Gtk.Dialog):
         title_box.append(row_tx)
         title_box.append(row_rx)
         title_box.append(row_in)
+        # Hide size text toggle
+        row_hide = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chk_title_hide_size = Gtk.CheckButton(label=_("Hide size from title"))
+        try:
+            self.chk_title_hide_size.set_active(bool(self.config['title_hide_sizetext']))
+        except Exception:
+            self.chk_title_hide_size.set_active(False)
+        row_hide.append(self.chk_title_hide_size)
+        title_box.append(row_hide)
         title_frame.set_child(title_box)
         prof_box.append(title_frame)
 
@@ -751,6 +811,10 @@ class PreferencesWindow(Gtk.Dialog):
                         except Exception:
                             pass
                 d.destroy()
+            try:
+                entry.connect('activate', lambda *_a: dlg.response(Gtk.ResponseType.OK))
+            except Exception:
+                pass
             dlg.connect('response', on_resp)
             dlg.present()
 
@@ -791,6 +855,10 @@ class PreferencesWindow(Gtk.Dialog):
             dlg.add_button(_("Cancel"), Gtk.ResponseType.CANCEL)
             dlg.add_button(_("Add"), Gtk.ResponseType.OK)
             dlg.show()
+            try:
+                entry.connect('activate', lambda *_a: dlg.response(Gtk.ResponseType.OK))
+            except Exception:
+                pass
             def on_resp(d, resp):
                 if resp == Gtk.ResponseType.OK:
                     name = entry.get_text().strip()
@@ -1170,6 +1238,11 @@ class PreferencesWindow(Gtk.Dialog):
         try:
             self.config['always_on_top'] = self.chk_always_on_top.get_active()
             self.config['hide_from_taskbar'] = self.chk_hide_taskbar.get_active()
+            try:
+                self.config['borderless'] = self.chk_borderless.get_active()
+                self.config['sticky'] = self.chk_sticky.get_active()
+            except Exception:
+                pass
             self.config['show_titlebar'] = self.chk_show_titlebar.get_active()
             self.config['title_at_bottom'] = self.chk_title_bottom.get_active()
             self.config['scroll_tabbar'] = self.chk_scroll_tabbar.get_active()
@@ -1179,6 +1252,11 @@ class PreferencesWindow(Gtk.Dialog):
             self.config['always_split_with_profile'] = self.chk_split_with_profile.get_active()
             self.config['clear_select_on_copy'] = self.chk_clear_on_copy.get_active()
             self.config['disable_mouse_paste'] = self.chk_disable_mouse_paste.get_active()
+            try:
+                self.config['putty_paste_style'] = self.chk_putty_paste.get_active()
+                self.config['putty_paste_style_source_clipboard'] = self.chk_putty_clip.get_active()
+            except Exception:
+                pass
             self.config['hide_on_lose_focus'] = self.chk_hide_on_lose.get_active()
             self.config['tab_position'] = self.combo_tabpos.get_active_text() or 'top'
             # Search defaults
@@ -1186,6 +1264,11 @@ class PreferencesWindow(Gtk.Dialog):
             self.config['invert_search'] = self.chk_invert_search.get_active()
             # Link handling
             self.config['link_single_click'] = self.chk_link_single.get_active()
+            # Handle size
+            try:
+                self.config['handle_size'] = int(self.spin_handle.get_value())
+            except Exception:
+                pass
             # Custom URL handler
             try:
                 self.config['use_custom_url_handler'] = self.chk_custom_url.get_active()
@@ -1311,6 +1394,10 @@ class PreferencesWindow(Gtk.Dialog):
                         self.config['title_font'] = f
                 except Exception:
                     pass
+                try:
+                    self.config['title_hide_sizetext'] = self.chk_title_hide_size.get_active()
+                except Exception:
+                    pass
                 self.config['title_transmit_fg_color'] = rgba_to_hex(self.tx_fg_btn.get_rgba())
                 self.config['title_transmit_bg_color'] = rgba_to_hex(self.tx_bg_btn.get_rgba())
                 self.config['title_receive_fg_color']  = rgba_to_hex(self.rx_fg_btn.get_rgba())
@@ -1340,6 +1427,11 @@ class PreferencesWindow(Gtk.Dialog):
             # Selection behavior (profile)
             try:
                 self.config['copy_on_selection'] = self.chk_copy_on_select.get_active()
+            except Exception:
+                pass
+            # Split to group (profile)
+            try:
+                self.config['split_to_group'] = self.chk_split_to_group.get_active()
             except Exception:
                 pass
             # Palette writeback
@@ -1387,6 +1479,12 @@ class PreferencesWindow(Gtk.Dialog):
                 parent.refresh_tab_close_buttons()
             if hasattr(parent, 'refresh_window_hints'):
                 parent.refresh_window_hints(self.chk_always_on_top.get_active(), self.chk_hide_taskbar.get_active())
+            # Apply handle size change
+            if hasattr(parent, 'refresh_handle_size'):
+                try:
+                    parent.refresh_handle_size(int(self.spin_handle.get_value()))
+                except Exception:
+                    pass
             # Apply broadcast default immediately
             if hasattr(parent, '_set_groupsend'):
                 try:
@@ -1397,6 +1495,9 @@ class PreferencesWindow(Gtk.Dialog):
             # Apply titlebar styling (colors and font)
             if hasattr(parent, 'refresh_titlebar_style'):
                 parent.refresh_titlebar_style()
+            # Apply title size visibility change
+            if hasattr(parent, 'refresh_title_sizes'):
+                parent.refresh_title_sizes()
             # Apply updated profile to focused terminal when relevant
             try:
                 term = parent._get_focused_terminal()

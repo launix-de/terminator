@@ -816,6 +816,23 @@ class Gtk4Terminal(Vte.Terminal):
                 a_html.set_enabled(has_sel)
         except Exception:
             pass
+        # Sync readonly and scrollbar toggle states with current widget state
+        try:
+            a_ro = self._action_group.lookup_action('toggle_readonly')
+            if a_ro is not None:
+                # Action state reflects read-only = True when input disabled
+                state = not bool(self.get_input_enabled()) if hasattr(self, 'get_input_enabled') else False
+                a_ro.set_state(GLib.Variant('b', state))
+        except Exception:
+            pass
+        try:
+            a_sb = self._action_group.lookup_action('toggle_scrollbar')
+            if a_sb is not None and hasattr(self, '_scroller') and self._scroller is not None:
+                hp, vp = self._scroller.get_policy()
+                shown = not (hp == Gtk.PolicyType.NEVER and vp == Gtk.PolicyType.NEVER)
+                a_sb.set_state(GLib.Variant('b', bool(shown)))
+        except Exception:
+            pass
         for a in ("split_horiz","split_vert","split_auto","new_tab"):
             if self._action_group.lookup_action(a) is None:
                 act = Gio.SimpleAction.new(a, None)
@@ -933,6 +950,35 @@ class Gtk4Terminal(Vte.Terminal):
             self._action_group.add_action(ag2)
 
         base_menu = build_menu_model(self)
+        # If terminal is held open, prepend a Relaunch Command item
+        held_menu = None
+        try:
+            if bool(getattr(self, '_is_held_open', False)):
+                # Ensure relaunch action exists
+                if self._action_group.lookup_action('relaunch') is None:
+                    act = Gio.SimpleAction.new('relaunch', None)
+                    def on_relaunch(_a, _p):
+                        try:
+                            cwd = self.get_cwd() if hasattr(self, 'get_cwd') else None
+                            self.spawn_login_shell(cwd)
+                            # Clear held flag and indicator
+                            setattr(self, '_is_held_open', False)
+                            win = self.get_root()
+                            if hasattr(win, '_update_title_for_terminal'):
+                                # Force an update to clear held label
+                                title = self.get_window_title() if hasattr(self, 'get_window_title') else ''
+                                win._update_title_for_terminal(self, title or '')
+                        except Exception:
+                            pass
+                    act.connect('activate', on_relaunch)
+                    self._action_group.add_action(act)
+                held_menu = Gio.Menu()
+                sec = Gio.Menu()
+                from .translation import _ as _tr
+                sec.append(_tr('Relaunch Command'), 'term.relaunch')
+                held_menu.append_section(None, sec)
+        except Exception:
+            held_menu = None
         # If right-clicked over a URL, offer quick actions first
         quick_menu = None
         url = None
@@ -1016,10 +1062,25 @@ class Gtk4Terminal(Vte.Terminal):
                 sub = quick_menu.get_item_link(i, Gio.MENU_LINK_SECTION)
                 if sub is not None:
                     mixed.append_section(None, sub)
+            # Optional held section
+            if held_menu is not None:
+                for i in range(held_menu.get_n_items()):
+                    sub = held_menu.get_item_link(i, Gio.MENU_LINK_SECTION)
+                    if sub is not None:
+                        mixed.append_section(None, sub)
             mixed.append_section(None, base_menu)
             self._menu = mixed
         else:
-            self._menu = base_menu
+            if held_menu is not None:
+                mixed = Gio.Menu()
+                for i in range(held_menu.get_n_items()):
+                    sub = held_menu.get_item_link(i, Gio.MENU_LINK_SECTION)
+                    if sub is not None:
+                        mixed.append_section(None, sub)
+                mixed.append_section(None, base_menu)
+                self._menu = mixed
+            else:
+                self._menu = base_menu
         self._popover.set_menu_model(self._menu)
 
         # Connect copy_html action to handler
@@ -1490,6 +1551,18 @@ class Gtk4Terminal(Vte.Terminal):
                 self.set_scrollback_lines(-1)
             else:
                 self.set_scrollback_lines(int(prof.get('scrollback_lines', 500)))
+        except Exception:
+            pass
+
+        # Scrollbar position (left/right) — approximate by setting ScrolledWindow text direction
+        try:
+            pos = str(prof.get('scrollbar_position', 'right')).lower()
+            if hasattr(self, '_scroller') and self._scroller is not None and hasattr(self._scroller, 'set_direction'):
+                from gi.repository import Gtk as _Gtk
+                if pos == 'left':
+                    self._scroller.set_direction(_Gtk.TextDirection.RTL)
+                else:
+                    self._scroller.set_direction(_Gtk.TextDirection.LTR)
         except Exception:
             pass
         # Scroll on output/keystroke
