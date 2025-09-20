@@ -29,6 +29,16 @@ def _find_user_shell() -> str:
 class Gtk4Terminal(Vte.Terminal):
     def __init__(self):
         super().__init__()
+        # Assign a uuid for layout serialization and grouping
+        try:
+            import uuid as _uuid
+            self.uuid = str(_uuid.uuid4())
+        except Exception:
+            self.uuid = None
+        # Map of plugin handler names to VTE match tag ids
+        self._plugin_match_tags = {}
+        # Reverse map from tag id to handler instance for transformation
+        self._plugin_tag_handlers = {}
         # Per-terminal config (shares base via Borg, but profile is per-instance)
         self.config = Config()
         self.set_scroll_on_output(False)
@@ -68,6 +78,16 @@ class Gtk4Terminal(Vte.Terminal):
                     self._copy_on_sel_handler = None
         except Exception:
             pass
+        # Track selection to enable/disable copy actions live
+        try:
+            self.connect('selection-changed', self._on_selection_changed_actions)
+        except Exception:
+            pass
+        # Install plugin URL handler regexes on this terminal (for hover/match behavior)
+        try:
+            self._install_plugin_url_matches()
+        except Exception:
+            pass
         # Apply current profile settings to this terminal
         try:
             self.apply_profile()
@@ -87,6 +107,25 @@ class Gtk4Terminal(Vte.Terminal):
             fctrl.connect('enter', lambda c: on_enter(c))
             fctrl.connect('leave', lambda c: on_leave(c))
             self.add_controller(fctrl)
+        except Exception:
+            pass
+
+        # Monitor clipboard changes to enable/disable paste actions
+        try:
+            disp = self.get_display()
+            if disp is not None:
+                cb = disp.get_clipboard()
+                try:
+                    cb.connect('changed', lambda *_a: self._update_clipboard_actions())
+                except Exception:
+                    pass
+                try:
+                    pcb = disp.get_primary_clipboard()
+                    pcb.connect('changed', lambda *_a: self._update_clipboard_actions())
+                except Exception:
+                    pass
+                # Initialize action states
+                self._update_clipboard_actions()
         except Exception:
             pass
 
@@ -160,6 +199,13 @@ class Gtk4Terminal(Vte.Terminal):
             def on_motion(ctrl, x, y):
                 self._update_link_cursor(x, y)
             mctrl.connect('motion', on_motion)
+            # Sloppy focus: focus terminal when pointer enters if configured
+            try:
+                def on_enter(ctrl, x, y):
+                    self._maybe_sloppy_focus()
+                mctrl.connect('enter', on_enter)
+            except Exception:
+                pass
             self.add_controller(mctrl)
         except Exception:
             pass
@@ -182,6 +228,25 @@ class Gtk4Terminal(Vte.Terminal):
                         pass
             click.connect('released', on_released)
             self.add_controller(click)
+        except Exception:
+            pass
+
+    def _maybe_sloppy_focus(self):
+        try:
+            sloppy = False
+            try:
+                if self.config.get_system_focus() in ['sloppy', 'mouse']:
+                    sloppy = True
+            except Exception:
+                pass
+            if not sloppy:
+                try:
+                    if self.config['focus'] in ['sloppy', 'mouse']:
+                        sloppy = True
+                except Exception:
+                    pass
+            if sloppy:
+                self.grab_focus()
         except Exception:
             pass
 
@@ -229,8 +294,23 @@ class Gtk4Terminal(Vte.Terminal):
             if isinstance(res, (list, tuple)) and res:
                 # Commonly returns (matched_string, tag)
                 s = res[0]
-                if isinstance(s, str) and (s.startswith('http://') or s.startswith('https://') or s.startswith('ftp://')):
-                    return s
+                tag = None
+                try:
+                    tag = int(res[1]) if len(res) > 1 else None
+                except Exception:
+                    tag = None
+                if isinstance(s, str):
+                    if s.startswith('http://') or s.startswith('https://') or s.startswith('ftp://'):
+                        return s
+                    # If this match came from a plugin handler, transform using its callback
+                    if tag is not None and tag in getattr(self, '_plugin_tag_handlers', {}):
+                        try:
+                            handler = self._plugin_tag_handlers.get(tag)
+                            final = handler.callback(s)
+                            if isinstance(final, str) and final:
+                                return final
+                        except Exception:
+                            pass
         except Exception:
             pass
         # Fallback: probe a small rectangle around the point and extract with get_text_range
@@ -288,8 +368,26 @@ class Gtk4Terminal(Vte.Terminal):
         if cwd is None:
             cwd = os.getcwd()
         pty_flags = Vte.PtyFlags.DEFAULT
-        shell = _find_user_shell()
-        argv = [shell]
+        # Build argv from profile settings
+        prof = {}
+        try:
+            prof = self.config.get_profile_by_name(self.config.get_profile())
+        except Exception:
+            prof = {}
+        use_custom = bool(prof.get('use_custom_command', False))
+        custom_cmd = str(prof.get('custom_command', '') or '')
+        login_shell = bool(prof.get('login_shell', False))
+        if use_custom and custom_cmd:
+            try:
+                import shlex as _shlex
+                argv = _shlex.split(custom_cmd)
+            except Exception:
+                argv = [custom_cmd]
+        else:
+            shell = _find_user_shell()
+            argv = [shell]
+            if login_shell:
+                argv.append('-l')
         envv = [f"{k}={v}" for k, v in os.environ.items()]
 
         def _on_spawned(*cb_args):
@@ -337,7 +435,76 @@ class Gtk4Terminal(Vte.Terminal):
 
     def open_url(self, url: str):
         try:
+            from .config import Config as _Cfg
+            cfg = _Cfg()
+            use_custom = bool(cfg['use_custom_url_handler'])
+            cmd = str(cfg['custom_url_handler'] or '').strip()
+        except Exception:
+            use_custom = False
+            cmd = ''
+        if use_custom and cmd:
+            try:
+                # Support %s placeholder; else append url
+                if '%s' in cmd:
+                    full = cmd.replace('%s', url)
+                    args = full
+                else:
+                    args = cmd + ' ' + url
+                # Spawn via Gio.Subprocess without blocking
+                sp = Gio.Subprocess.new(['bash','-lc', args], Gio.SubprocessFlags.NONE)
+                # Do not wait
+                return
+            except Exception:
+                pass
+        try:
             Gio.AppInfo.launch_default_for_uri(url)
+        except Exception:
+            pass
+
+    # GTK3-compat for plugin URLHandler API
+    def match_add(self, handler_name: str, pattern: str):
+        try:
+            rx = None
+            try:
+                rx = Vte.Regex.new_for_match(pattern, 0, 0)
+            except Exception:
+                rx = None
+            if rx is None:
+                return -1
+            tag = None
+            if hasattr(self, 'match_add_regex'):
+                tag = self.match_add_regex(rx, 0)
+            elif hasattr(self, 'match_add'):
+                tag = self.match_add(rx, 0)
+            if tag is not None:
+                self._plugin_match_tags[str(handler_name)] = int(tag)
+                return int(tag)
+        except Exception:
+            pass
+        return -1
+
+    def match_remove(self, handler_name_or_tag):
+        try:
+            tag = None
+            if isinstance(handler_name_or_tag, int):
+                tag = handler_name_or_tag
+            else:
+                tag = self._plugin_match_tags.get(str(handler_name_or_tag))
+            if tag is None:
+                return
+            if hasattr(self, 'match_remove'):
+                # Some bindings expose match_remove(tag)
+                try:
+                    super().match_remove(int(tag))
+                except Exception:
+                    pass
+            # Clean mapping
+            try:
+                for k, v in list(self._plugin_match_tags.items()):
+                    if v == tag or k == handler_name_or_tag:
+                        del self._plugin_match_tags[k]
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -353,10 +520,22 @@ class Gtk4Terminal(Vte.Terminal):
             return None
 
     def get_window_title(self):
+        """Return the VTE-provided window title for this terminal.
+
+        Matches GTK3 behavior which reads the terminal's own title (OSC 0/2),
+        not the application window title.
+        """
         try:
-            win = self.get_root()
-            if hasattr(win, 'get_title'):
-                return win.get_title()
+            # Prefer explicit Vte.Terminal API
+            title = Vte.Terminal.get_window_title(self)
+            if title:
+                return title
+        except Exception:
+            pass
+        try:
+            icon = Vte.Terminal.get_icon_title(self)
+            if icon:
+                return icon
         except Exception:
             pass
         return ''
@@ -442,9 +621,19 @@ class Gtk4Terminal(Vte.Terminal):
 
         act_close = Gio.SimpleAction.new("close", None)
         def _do_close(a, p):
-            toplevel = self.get_root()
-            if isinstance(toplevel, Gtk.Window):
-                toplevel.close()
+            # Close only the current terminal, not the whole window
+            win = self.get_root()
+            if hasattr(win, '_on_close_term'):
+                try:
+                    win._on_close_term()
+                    return
+                except Exception:
+                    pass
+            # Fallback: try to exit the shell
+            try:
+                self.feed_child("exit\n")
+            except Exception:
+                pass
         act_close.connect("activate", _do_close)
         action_group.add_action(act_close)
 
@@ -462,15 +651,19 @@ class Gtk4Terminal(Vte.Terminal):
         act_ro.connect("change-state", on_ro)
         action_group.add_action(act_ro)
 
-        # Toggle scrollbar
+        # Toggle scrollbar (hide both bars and disable overlay when off)
         sb_initial = True
         act_sb = Gio.SimpleAction.new_stateful("toggle_scrollbar", None, GLib.Variant('b', sb_initial))
         def on_sb(action, value):
             action.set_state(value)
             if self._scroller is not None:
-                self._scroller.set_policy(Gtk.PolicyType.NEVER if not value.get_boolean() else Gtk.PolicyType.AUTOMATIC,
-                                          Gtk.PolicyType.AUTOMATIC)
-                self._scroller.set_overlay_scrolling(value.get_boolean())
+                show = bool(value.get_boolean())
+                self._scroller.set_policy(Gtk.PolicyType.AUTOMATIC if show else Gtk.PolicyType.NEVER,
+                                          Gtk.PolicyType.AUTOMATIC if show else Gtk.PolicyType.NEVER)
+                try:
+                    self._scroller.set_overlay_scrolling(show)
+                except Exception:
+                    pass
         act_sb.connect("change-state", on_sb)
         action_group.add_action(act_sb)
 
@@ -556,6 +749,19 @@ class Gtk4Terminal(Vte.Terminal):
         # Ensure actions exist
         if self._action_group.lookup_action("copy_html") is None:
             self._action_group.add_action(Gio.SimpleAction.new("copy_html", None))
+        # Update copy/copy_html sensitivity based on selection state if possible
+        try:
+            has_sel = False
+            if hasattr(self, 'get_has_selection'):
+                has_sel = bool(self.get_has_selection())
+            a_copy = self._action_group.lookup_action('copy')
+            a_html = self._action_group.lookup_action('copy_html')
+            if a_copy is not None:
+                a_copy.set_enabled(has_sel)
+            if a_html is not None:
+                a_html.set_enabled(has_sel)
+        except Exception:
+            pass
         for a in ("split_horiz","split_vert","split_auto","new_tab"):
             if self._action_group.lookup_action(a) is None:
                 act = Gio.SimpleAction.new(a, None)
@@ -667,7 +873,7 @@ class Gtk4Terminal(Vte.Terminal):
                 act = Gio.SimpleAction.new('open_link', None)
                 def on_open(_a, _p):
                     try:
-                        Gio.AppInfo.launch_default_for_uri(url)
+                        self.open_url(url)
                     except Exception:
                         pass
                 act.connect('activate', on_open)
@@ -694,6 +900,40 @@ class Gtk4Terminal(Vte.Terminal):
                 sec.append('Open Link', 'term.open_link')
                 sec.append('Copy Link Address', 'term.copy_link')
             quick_menu.append_section(None, sec)
+        else:
+            # If not a standard URL, try plugin URL handlers (e.g., lp:12345)
+            try:
+                x, y = self._rclick_xy
+                plug = self._plugin_url_action_at_point(x, y)
+            except Exception:
+                plug = None
+            if plug is not None:
+                open_label, copy_label, final_url = plug
+                # Install actions bound to this resolved URL
+                if self._action_group.lookup_action('open_link') is None:
+                    act = Gio.SimpleAction.new('open_link', None)
+                    act.connect('activate', lambda *_a: self.open_url(final_url))
+                    self._action_group.add_action(act)
+                else:
+                    # Rebind by removing and re-adding with new callback is tricky; rely on capturing variable
+                    pass
+                if self._action_group.lookup_action('copy_link') is None:
+                    act2 = Gio.SimpleAction.new('copy_link', None)
+                    def on_copy2(_a, _p):
+                        try:
+                            disp = self.get_display()
+                            if disp is not None:
+                                cb = disp.get_clipboard()
+                                cb.set_text(final_url)
+                        except Exception:
+                            pass
+                    act2.connect('activate', on_copy2)
+                    self._action_group.add_action(act2)
+                quick_menu = Gio.Menu()
+                sec = Gio.Menu()
+                sec.append(open_label, 'term.open_link')
+                sec.append(copy_label, 'term.copy_link')
+                quick_menu.append_section(None, sec)
 
         if quick_menu is not None:
             mixed = Gio.Menu()
@@ -711,8 +951,105 @@ class Gtk4Terminal(Vte.Terminal):
         # Connect copy_html action to handler
         act_html = self._action_group.lookup_action('copy_html')
         if act_html is not None and not hasattr(act_html, '_connected_html'):
-            act_html.connect('activate', lambda a, p: self.copy_selection_as_html())
+            def on_copy_html(_a, _p):
+                try:
+                    self.copy_selection_as_html()
+                    # Clear selection after copy if configured
+                    try:
+                        from .config import Config as _Cfg
+                        if bool(_Cfg()['clear_select_on_copy']) and hasattr(self, 'unselect_all'):
+                            self.unselect_all()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            act_html.connect('activate', on_copy_html)
             setattr(act_html, '_connected_html', True)
+        # Ensure paste actions are enabled/disabled per clipboard
+        try:
+            self._update_clipboard_actions()
+        except Exception:
+            pass
+
+    def _plugin_url_action_at_point(self, x: float, y: float):
+        # Probe text around pointer row and try URL handler plugins
+        try:
+            # Determine row and grab full line text
+            if hasattr(self, 'convert_pixels_to_cell'):
+                col, row = self.convert_pixels_to_cell(int(x), int(y))
+            else:
+                row = 0
+            total_cols = getattr(self, 'get_column_count')() if hasattr(self, 'get_column_count') else 0
+            if total_cols <= 0:
+                total_cols = 200
+            rng = self.get_text_range(max(0, row), 0, row, max(0, total_cols - 1))
+            line = rng[0] if isinstance(rng, (list, tuple)) and rng else ''
+        except Exception:
+            line = ''
+        if not line:
+            return None
+        try:
+            from .plugin import PluginRegistry
+            import re as _re
+            reg = PluginRegistry()
+            reg.load_plugins(force=True, capabilities_filter={'url_handler'})
+            handlers = reg.get_plugins_by_capability('url_handler')
+        except Exception:
+            handlers = []
+        for h in handlers:
+            try:
+                pat = getattr(h, 'match', None)
+                if not pat:
+                    continue
+                m = _re.search(pat, line)
+                if not m:
+                    continue
+                matched = m.group(0)
+                try:
+                    final = h.callback(matched)
+                except Exception:
+                    final = matched
+                open_label = getattr(h, 'nameopen', 'Open Link')
+                copy_label = getattr(h, 'namecopy', 'Copy Address')
+                from .translation import _
+                return (_(open_label), _(copy_label), str(final))
+            except Exception:
+                continue
+        return None
+
+    def _install_plugin_url_matches(self):
+        try:
+            from .plugin import PluginRegistry
+            reg = PluginRegistry()
+            reg.load_plugins(force=True, capabilities_filter={'url_handler'})
+            handlers = reg.get_plugins_by_capability('url_handler')
+        except Exception:
+            handlers = []
+        # Add each handler's regex to VTE matchers if possible
+        for h in handlers:
+            try:
+                pattern = getattr(h, 'match', None)
+                if not pattern:
+                    continue
+                try:
+                    rx = Vte.Regex.new_for_match(pattern, 0, 0)
+                except Exception:
+                    rx = None
+                if rx is None:
+                    continue
+                if hasattr(self, 'match_add_regex'):
+                    tag = self.match_add_regex(rx, 0)
+                elif hasattr(self, 'match_add'):
+                    tag = self.match_add(rx, 0)
+                else:
+                    tag = None
+                if tag is not None:
+                    try:
+                        self._plugin_tag_handlers[int(tag)] = h
+                    except Exception:
+                        pass
+            except Exception:
+                continue
 
     def _on_profile_activate(self, action, param):
         profile = param.get_string() if param else None
@@ -722,6 +1059,68 @@ class Gtk4Terminal(Vte.Terminal):
             if profile in self.config.list_profiles():
                 self.config.set_profile(profile, True)
                 self.apply_profile()
+        except Exception:
+            pass
+
+    def _on_selection_changed_actions(self, *args):
+        try:
+            has_sel = bool(self.get_has_selection()) if hasattr(self, 'get_has_selection') else False
+            ag = getattr(self, '_action_group', None)
+            if ag is None:
+                return
+            a_copy = ag.lookup_action('copy')
+            a_html = ag.lookup_action('copy_html')
+            if a_copy is not None:
+                a_copy.set_enabled(has_sel)
+            if a_html is not None:
+                a_html.set_enabled(has_sel)
+        except Exception:
+            pass
+
+    def _update_clipboard_actions(self):
+        try:
+            disp = self.get_display()
+            if disp is None:
+                return
+            paste_ok = True
+            paste_sel_ok = True
+            try:
+                cb = disp.get_clipboard()
+                fmts = cb.get_formats() if hasattr(cb, 'get_formats') else None
+                if fmts is not None:
+                    # Best-effort: require some text-like format
+                    ok = False
+                    try:
+                        # Some backends expose 'text/plain'
+                        if hasattr(fmts, 'contain_mime_type') and fmts.contain_mime_type('text/plain'):
+                            ok = True
+                    except Exception:
+                        pass
+                    # If we cannot determine, leave enabled
+                    paste_ok = ok or True
+            except Exception:
+                paste_ok = True
+            try:
+                pcb = disp.get_primary_clipboard()
+                fmts2 = pcb.get_formats() if hasattr(pcb, 'get_formats') else None
+                if fmts2 is not None:
+                    ok2 = False
+                    try:
+                        if hasattr(fmts2, 'contain_mime_type') and fmts2.contain_mime_type('text/plain'):
+                            ok2 = True
+                    except Exception:
+                        pass
+                    paste_sel_ok = ok2 or True
+            except Exception:
+                paste_sel_ok = True
+            ag = getattr(self, '_action_group', None)
+            if ag is not None:
+                a_paste = ag.lookup_action('paste')
+                a_paste_sel = ag.lookup_action('paste_selection')
+                if a_paste is not None:
+                    a_paste.set_enabled(paste_ok)
+                if a_paste_sel is not None:
+                    a_paste_sel.set_enabled(paste_sel_ok)
         except Exception:
             pass
 
@@ -1076,6 +1475,27 @@ class Gtk4Terminal(Vte.Terminal):
         except Exception:
             pass
 
+        # Selection highlight colors
+        try:
+            if not bool(prof.get('selection_color_default', True)):
+                hl_fg = rgba(prof.get('selection_fg_color', ''))
+                hl_bg = rgba(prof.get('selection_bg_color', ''))
+                try:
+                    # Newer VTE
+                    if hasattr(self, 'set_color_highlight') and hl_bg is not None:
+                        self.set_color_highlight(hl_bg)
+                    if hasattr(self, 'set_color_highlight_foreground') and hl_fg is not None:
+                        self.set_color_highlight_foreground(hl_fg)
+                except Exception:
+                    # Some bindings may use set_color_selection
+                    try:
+                        if hasattr(self, 'set_color_selection') and hl_bg is not None:
+                            self.set_color_selection(hl_bg)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # Copy on selection (connect or disconnect handler per profile)
         try:
             want = bool(prof.get('copy_on_selection', False))
@@ -1188,13 +1608,25 @@ class Gtk4Terminal(Vte.Terminal):
                         # Provide both text/html and text/plain to both clipboard and primary
                         from gi.repository import Gdk, GLib
                         providers = []
+                        # HTML variants
                         try:
-                            providers.append(Gdk.ContentProvider.new_for_bytes('text/html', GLib.Bytes.new(html.encode('utf-8'))))
+                            data = GLib.Bytes.new(html.encode('utf-8'))
+                            providers.append(Gdk.ContentProvider.new_for_bytes('text/html', data))
                         except Exception:
                             pass
+                        try:
+                            data2 = GLib.Bytes.new(html.encode('utf-8'))
+                            providers.append(Gdk.ContentProvider.new_for_bytes('text/html;charset=utf-8', data2))
+                        except Exception:
+                            pass
+                        # Plain text variants
                         if text:
                             try:
                                 providers.append(Gdk.ContentProvider.new_for_bytes('text/plain', GLib.Bytes.new(text.encode('utf-8'))))
+                            except Exception:
+                                pass
+                            try:
+                                providers.append(Gdk.ContentProvider.new_for_bytes('text/plain;charset=utf-8', GLib.Bytes.new(text.encode('utf-8'))))
                             except Exception:
                                 pass
                         if providers:

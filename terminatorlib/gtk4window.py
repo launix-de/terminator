@@ -9,6 +9,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Vte', '3.91')
 from gi.repository import Gtk, GLib, Gdk
 from .translation import _
+from .version import APP_NAME, APP_VERSION
 
 from .gtk4terminal import Gtk4Terminal
 from .gtk4titlebar import Gtk4Titlebar
@@ -24,6 +25,7 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         self._uuid_unit_map = {}
         self._install_shortcuts()
         self._force_close = False
+        self._focused_uuid = None
         # Intercept close to optionally confirm
         try:
             self.connect('close-request', self._on_close_request)
@@ -128,6 +130,14 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 return self._count_terminals_in(self.get_child()) > 0
             except Exception:
                 return False
+        # Unregister from global registry for plugin compatibility
+        try:
+            from .terminator import Terminator as _Term
+            t = _Term()
+            if term in t.terminals:
+                t.terminals.remove(term)
+        except Exception:
+            pass
         if isinstance(parent, Gtk.Paned):
             # Identify the sibling to keep
             if parent.get_end_child() is unit:
@@ -141,7 +151,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
 
             grand = parent.get_parent()
 
-            if isinstance(grand, Gtk.Paned):
+            if grand is None:
+                # Parent paned was at the root; replace window child
+                try:
+                    self.set_child(other)
+                except Exception:
+                    pass
+            elif isinstance(grand, Gtk.Paned):
                 # Replace the container in its grandparent paned slot
                 if grand.get_start_child() is parent:
                     grand.set_start_child(other)
@@ -210,6 +226,14 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         from .config import Config
         cfg = Config()
         term = Gtk4Terminal()
+        # Register terminal globally for plugin compatibility (Remote, URL handlers, etc.)
+        try:
+            from .terminator import Terminator as _Term
+            t = _Term()
+            if term not in t.terminals:
+                t.terminals.append(term)
+        except Exception:
+            pass
         scroller = Gtk.ScrolledWindow()
         scroller.set_hexpand(True)
         scroller.set_vexpand(True)
@@ -247,6 +271,13 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         except Exception:
             unit.append(titlebar)
             unit.append(scroller)
+
+        # Initialize broadcast icon state for this unit
+        try:
+            if hasattr(self, '_update_broadcast_for_unit'):
+                self._update_broadcast_for_unit(unit)
+        except Exception:
+            pass
 
         return term, unit
 
@@ -437,6 +468,9 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
     def _on_terminal_focus_changed(self, term, focused: bool):
         # Recompute active/transmit/receive states when focus changes
         try:
+            # Track focused terminal uuid for layout serialization
+            if focused and hasattr(term, 'uuid') and term.uuid:
+                self._focused_uuid = term.uuid
             self._update_active_states()
         except Exception:
             pass
@@ -548,6 +582,8 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             'zoom_in': self._on_zoom_in,
             'zoom_out': self._on_zoom_out,
             'zoom_normal': self._on_zoom_normal,
+            'toggle_zoom': self._on_toggle_zoom,
+            'scaled_zoom': self._on_toggle_zoom,
             'toggle_scrollbar': self._on_toggle_scrollbar,
             'full_screen': self._on_full_screen,
             'new_window': self._on_new_window,
@@ -713,6 +749,11 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 self.set_keep_above(bool(always_on_top))
         except Exception:
             pass
+        try:
+            if hasattr(self, 'set_skip_taskbar_hint'):
+                self.set_skip_taskbar_hint(bool(hide_from_taskbar))
+        except Exception:
+            pass
 
     def refresh_titlebar_style(self):
         # Build CSS for titlebar colors/fonts from profile settings
@@ -748,11 +789,6 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         try:
             data = ('\n'.join(css_parts)).encode('utf-8')
             self._title_css_provider.load_from_data(data)
-        except Exception:
-            pass
-        try:
-            if hasattr(self, 'set_skip_taskbar_hint'):
-                self.set_skip_taskbar_hint(bool(hide_from_taskbar))
         except Exception:
             pass
 
@@ -1014,10 +1050,21 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         if term is not None:
             scroller = term.get_parent()
             if isinstance(scroller, Gtk.ScrolledWindow):
-                # Toggle between automatic and never
+                # Toggle both scrollbars together and disable overlay when hidden
                 hp, vp = scroller.get_policy()
-                new_policy = Gtk.PolicyType.NEVER if hp != Gtk.PolicyType.NEVER else Gtk.PolicyType.AUTOMATIC
-                scroller.set_policy(new_policy, Gtk.PolicyType.AUTOMATIC)
+                hide = not (hp == Gtk.PolicyType.NEVER and vp == Gtk.PolicyType.NEVER)
+                if hide:
+                    scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
+                    try:
+                        scroller.set_overlay_scrolling(False)
+                    except Exception:
+                        pass
+                else:
+                    scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+                    try:
+                        scroller.set_overlay_scrolling(True)
+                    except Exception:
+                        pass
         return True
 
     def _on_full_screen(self, *args):
@@ -1247,7 +1294,24 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 pass
         except Exception:
             pass
+        # Create the new inner paned that will replace the current unit
         paned = Gtk.Paned(orientation=orientation)
+        # Capture current unit allocation to set a sensible initial split position
+        try:
+            alloc = unit.get_allocation()
+            prev_size = alloc.width if orientation == Gtk.Orientation.HORIZONTAL else alloc.height
+            # Aim for a 50/50 split of the previous unit area
+            desired_pos = max(1, int(prev_size / 2))
+            def _set_pos_once(p):
+                try:
+                    p.set_position(desired_pos)
+                except Exception:
+                    pass
+                return False
+            # Defer setting until widget is mapped to ensure it has an allocation
+            paned.connect('map', lambda w: GLib.idle_add(_set_pos_once, paned))
+        except Exception:
+            pass
 
         # For Gtk.Box, remember insertion position before removing
         insert_after = None
@@ -1259,12 +1323,17 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 child = child.get_next_sibling()
             insert_after = prev
 
-        # Detach scroller from its current parent before reparenting
+        # Detach current unit from its parent before reparenting
         if isinstance(parent, Gtk.Paned):
-            if parent.get_start_child() is scroller:
+            # Compare against the unit container (not the scroller)
+            if parent.get_start_child() is unit:
                 parent.set_start_child(None)
-            else:
+                replaced_side = 'start'
+            elif parent.get_end_child() is unit:
                 parent.set_end_child(None)
+                replaced_side = 'end'
+            else:
+                replaced_side = None
         elif isinstance(parent, Gtk.Box):
             parent.remove(unit)
         elif isinstance(parent, Gtk.Notebook):
@@ -1277,20 +1346,36 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
             if idx >= 0:
                 parent.remove_page(idx)
 
-        paned.set_start_child(unit)
-        paned.set_end_child(new_unit)
+        # Order new and current within the inner paned to match original behavior:
+        # If parent is a Gtk.Paned with the same orientation and the current unit
+        # is the start child, place new to the right/bottom (end). If current is
+        # the end child, place new to the left/top (start), so the new split appears
+        # "inside" between current and its sibling.
+        place_new_at_end = True
+        try:
+            if isinstance(parent, Gtk.Paned) and parent.get_orientation() == orientation:
+                if parent.get_end_child() is unit:
+                    place_new_at_end = False
+        except Exception:
+            pass
+        if place_new_at_end:
+            paned.set_start_child(unit)
+            paned.set_end_child(new_unit)
+        else:
+            paned.set_start_child(new_unit)
+            paned.set_end_child(unit)
+        # Let both children resize to keep proportional behavior similar to GTK3
         paned.set_resize_start_child(True)
         paned.set_resize_end_child(True)
 
         if isinstance(parent, Gtk.Paned):
-            # Replace in same slot
-            # Note: at this point, parent's child slot is empty
-            if parent.get_start_child() is None:
+            # Replace in the same slot we removed from
+            if replaced_side == 'start':
                 parent.set_start_child(paned)
-            elif parent.get_end_child() is None:
+            elif replaced_side == 'end':
                 parent.set_end_child(paned)
             else:
-                # Fallback: set end child
+                # Fallback: put it on the end
                 parent.set_end_child(paned)
         elif isinstance(parent, Gtk.Box):
             if insert_after is None:
@@ -1510,9 +1595,37 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         return True
 
     def _on_help(self, *args):
+        # Prefer About dialog if available in GTK4
+        try:
+            about = Gtk.AboutDialog(transient_for=self, modal=True)
+            try:
+                about.set_program_name('Terminator')
+            except Exception:
+                pass
+            try:
+                about.set_version(APP_VERSION)
+            except Exception:
+                pass
+            try:
+                about.set_authors(['Chris Jones', 'Terminator contributors'])
+            except Exception:
+                pass
+            try:
+                about.set_website('https://gnome-terminator.org')
+            except Exception:
+                pass
+            try:
+                about.set_comments(_('Multiple GNOME terminals in one window (GTK4 Port)'))
+            except Exception:
+                pass
+            about.connect('response', lambda d, r: d.destroy())
+            about.present()
+            return True
+        except Exception:
+            pass
         dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
-                                buttons=Gtk.ButtonsType.OK, text='Terminator GTK4 Port')
-        dlg.format_secondary_text('Help will be ported. See port.md and README for status.')
+                                buttons=Gtk.ButtonsType.OK, text=_('Terminator GTK4 Port'))
+        dlg.format_secondary_text(_('Help will be ported. See port.md and README for status.'))
         dlg.connect('response', lambda d, r: d.destroy())
         dlg.present()
         return True
@@ -1601,20 +1714,7 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         if root_child is not None:
             process(root_child)
 
-    def zoom_terminal(self, term: Gtk4Terminal):
-        # Zoom the unit containing this terminal
-        unit = term.get_parent().get_parent()
-        if getattr(self, '_zoomed_unit', None) is None or self._zoomed_unit is not unit:
-            self._apply_zoom(unit)
-        else:
-            self._clear_zoom()
-
-    def _on_full_screen(self, *args):
-        if self.is_fullscreen():
-            self.unfullscreen()
-        else:
-            self.fullscreen()
-        return True
+    
 
     def _on_hide_window(self, *args):
         try:
@@ -1631,28 +1731,20 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
         except Exception:
             pass
 
-    # Zoom callbacks operate on focused terminal
-    def _on_zoom_in(self, *args):
-        term = self._get_focused_terminal()
-        if term is not None and hasattr(term, 'zoom_step'):
-            term.zoom_step(0.1)
-        return True
-
-    def _on_zoom_out(self, *args):
-        term = self._get_focused_terminal()
-        if term is not None and hasattr(term, 'zoom_step'):
-            term.zoom_step(-0.1)
-        return True
-
-    def _on_zoom_normal(self, *args):
-        term = self._get_focused_terminal()
-        if term is not None and hasattr(term, 'zoom_reset'):
-            term.zoom_reset()
-        return True
+    
 
     def zoom_terminal(self, term: Gtk4Terminal):
-        # TODO: implement zoom toggle using a revealer or overlay
-        pass
+        if term is None:
+            return True
+        unit = term.get_parent().get_parent() if term.get_parent() else None
+        if unit is None:
+            return True
+        # Toggle zoom for this unit: if already zoomed, clear; else apply
+        if getattr(self, '_zoomed_unit', None) is unit:
+            self._clear_zoom()
+        else:
+            self._apply_zoom(unit)
+        return True
 
     def open_new_tab(self):
         child = self.get_child()
@@ -1967,6 +2059,177 @@ class TerminatorGtk4Window(Gtk.ApplicationWindow):
                 self._focus_terminal_by_uuid(last_uuid)
         except Exception:
             pass
+
+    # --- Layout serialization (GTK4) ---
+    def describe_layout(self, save_cwd: bool = False) -> dict:
+        layout = {}
+        # Window-level metadata
+        try:
+            title = self.get_title()
+            if title:
+                layout['title'] = title
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'is_maximized') and self.is_maximized():
+                layout['maximised'] = 'True'
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'is_fullscreen') and self.is_fullscreen():
+                layout['fullscreen'] = 'True'
+        except Exception:
+            pass
+        # Size best-effort
+        try:
+            alloc = self.get_allocation()
+            if alloc.width > 0 and alloc.height > 0:
+                layout['size'] = [alloc.width, alloc.height]
+        except Exception:
+            pass
+        # Last active terminal
+        try:
+            if getattr(self, '_focused_uuid', None):
+                layout['last_active_term'] = self._focused_uuid
+        except Exception:
+            pass
+        # Root child serialization
+        child = self.get_child()
+        if child is None:
+            return layout
+        layout['children'] = {'child0': self._describe_node(child, 0, save_cwd)}
+        return layout
+
+    def _describe_node(self, widget: Gtk.Widget, order: int, save_cwd: bool) -> dict:
+        # Terminal unit container: Gtk.Box with titlebar + scroller
+        if isinstance(widget, Gtk.Box):
+            first = widget.get_first_child()
+            second = first.get_next_sibling() if first is not None else None
+            # titlebar check
+            if isinstance(first, Gtk.Box) and hasattr(first, 'get_css_classes') and 'term-titlebar' in first.get_css_classes():
+                # Find terminal
+                term = None
+                try:
+                    scroller = second
+                    if hasattr(scroller, 'get_child'):
+                        term = scroller.get_child()
+                except Exception:
+                    term = None
+                node = {'type': 'Terminal', 'order': order}
+                # Profile
+                try:
+                    if term is not None and hasattr(term, 'config'):
+                        node['profile'] = term.config.get_profile()
+                except Exception:
+                    pass
+                # Command and working directory
+                try:
+                    if term is not None and hasattr(term, 'config'):
+                        prof = term.config.get_profile_by_name(term.config.get_profile())
+                        if prof.get('use_custom_command'):
+                            node['command'] = prof.get('custom_command') or ''
+                except Exception:
+                    pass
+                try:
+                    if save_cwd and term is not None and hasattr(term, 'get_cwd'):
+                        cwd = term.get_cwd()
+                        if cwd:
+                            node['directory'] = cwd
+                except Exception:
+                    pass
+                # Group
+                try:
+                    grp = getattr(term, '_group', None)
+                    if grp:
+                        node['group'] = grp
+                except Exception:
+                    pass
+                # Title from titlebar
+                try:
+                    titlebar = first
+                    c = titlebar.get_first_child()
+                    # title label is the one with hexpand=True set earlier; find Gtk.Label with hexpand
+                    while c is not None:
+                        from gi.repository import Gtk as _Gtk
+                        if isinstance(c, _Gtk.Label):
+                            node['title'] = c.get_label() or ''
+                        c = c.get_next_sibling()
+                except Exception:
+                    pass
+                # uuid
+                try:
+                    if term is not None and getattr(term, 'uuid', None):
+                        node['uuid'] = term.uuid
+                except Exception:
+                    pass
+                return node
+            else:
+                # Not a terminal unit: recurse into children and flatten
+                result = None
+                child = widget.get_first_child()
+                if child is None:
+                    return {'type': 'Terminal', 'order': order}
+                # If this box contains a single notebook or paned, describe it
+                return self._describe_node(child, order, save_cwd)
+        elif isinstance(widget, Gtk.Paned):
+            # H/V split
+            orientation = widget.get_orientation() if hasattr(widget, 'get_orientation') else Gtk.Orientation.HORIZONTAL
+            node = {
+                'type': 'vpaned' if orientation == Gtk.Orientation.VERTICAL else 'hpaned',
+                'order': order,
+                'children': {}
+            }
+            if widget.get_start_child() is not None:
+                node['children']['child0'] = self._describe_node(widget.get_start_child(), 0, save_cwd)
+            if widget.get_end_child() is not None:
+                node['children']['child1'] = self._describe_node(widget.get_end_child(), 1, save_cwd)
+            # Ratio best-effort
+            try:
+                pos = widget.get_position()
+                alloc = widget.get_allocation()
+                size = alloc.width if orientation == Gtk.Orientation.HORIZONTAL else alloc.height
+                if size > 0:
+                    node['ratio'] = float(pos) / float(size)
+            except Exception:
+                pass
+            return node
+        elif isinstance(widget, Gtk.Notebook):
+            node = {'type': 'notebook', 'order': order, 'children': {}, 'labels': []}
+            n = widget.get_n_pages()
+            for i in range(n):
+                page = widget.get_nth_page(i)
+                node['children'][f'child{i}'] = self._describe_node(page, i, save_cwd)
+                # Label text
+                try:
+                    lbl = widget.get_tab_label(page)
+                    if lbl:
+                        from gi.repository import Gtk as _Gtk
+                        if isinstance(lbl, _Gtk.Box):
+                            c = lbl.get_first_child()
+                            text = c.get_label() if isinstance(c, _Gtk.Label) else str(i+1)
+                        elif isinstance(lbl, _Gtk.Label):
+                            text = lbl.get_label() or str(i+1)
+                        else:
+                            text = str(i+1)
+                        node['labels'].append(text)
+                except Exception:
+                    node['labels'].append(str(i+1))
+            try:
+                ap = widget.get_current_page()
+                node['active_page'] = max(0, int(ap))
+            except Exception:
+                pass
+            return node
+        else:
+            # Unknown widget: if it has a child, describe it, else fallback to terminal
+            try:
+                if hasattr(widget, 'get_child'):
+                    ch = widget.get_child()
+                    if ch is not None:
+                        return self._describe_node(ch, order, save_cwd)
+            except Exception:
+                pass
+            return {'type': 'Terminal', 'order': order}
 
     def _build_node(self, node: dict):
         t = (node.get('type') or '').lower()

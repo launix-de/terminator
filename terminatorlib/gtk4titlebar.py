@@ -87,6 +87,19 @@ class Gtk4Titlebar(Gtk.Box):
             self._broadcast.set_from_icon_name(icon)
         except Exception:
             pass
+        # Reflect state via CSS classes on the titlebar for theming
+        try:
+            for cls in ('broadcast-off', 'broadcast-group', 'broadcast-all'):
+                if cls in self.get_css_classes():
+                    self.remove_css_class(cls)
+            if mode == 'all':
+                self.add_css_class('broadcast-all')
+            elif mode == 'group' and is_member:
+                self.add_css_class('broadcast-group')
+            else:
+                self.add_css_class('broadcast-off')
+        except Exception:
+            pass
 
     def set_active_state(self, state: str):
         """state: 'tx' | 'rx' | 'inactive' -> toggles CSS classes"""
@@ -154,6 +167,8 @@ class Gtk4Titlebar(Gtk.Box):
         add_action(_('Create Group…'), lambda: getattr(win, '_on_create_group')())
         # Close terminal
         add_action(_('Close Terminal'), lambda: getattr(win, '_on_close_term')())
+        # About / Help
+        add_action(_('About Terminator'), lambda: getattr(win, '_on_help')())
 
         pop.set_child(box)
         pop.popup()

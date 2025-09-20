@@ -19,37 +19,35 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     cfg = Config()
     menu = Gio.Menu()
 
-    # Clipboard
+    # Clipboard (match original order and items)
     sec1 = Gio.Menu()
     sec1.append(_('_Copy'), 'term.copy')
     sec1.append(_('_Copy as HTML'), 'term.copy_html')
     sec1.append(_('_Paste'), 'term.paste')
-    sec1.append(_('Paste Se_lection'), 'term.paste_selection')
     menu.append_section(None, sec1)
 
     # Actions
     sec2 = Gio.Menu()
     sec2.append(_('Set _Window Title'), 'term.edit_window_title')
-    sec2.append(_('Set _Tab Title'), 'term.edit_tab_title')
-    sec2.append(_('_Find…'), 'term.search')
-    sec2.append(_('Find _Next'), 'term.find_next')
-    sec2.append(_('Find _Previous'), 'term.find_previous')
-    sec2.append(_('Find _Next'), 'term.find_next')
-    sec2.append(_('Find _Previous'), 'term.find_previous')
     sec2.append(_('Split _Auto'), 'term.split_auto')
     sec2.append(_('Split H_orizontally'), 'term.split_horiz')
     sec2.append(_('Split V_ertically'), 'term.split_vert')
     sec2.append(_('Open _Tab'), 'term.new_tab')
-    sec2.append(_('_Reset'), 'term.reset')
-    sec2.append(_('Reset and _Clear'), 'term.reset_clear')
     sec2.append(_('_Close'), 'term.close')
     menu.append_section(None, sec2)
 
-    # View
+    # View (no Full Screen in original popup)
     sec3 = Gio.Menu()
-    sec3.append(_('_Zoom terminal'), 'term.zoom')
-    sec3.append(_('Ma_ximize terminal'), 'term.maximize')
-    sec3.append(_('_Full Screen'), 'term.full_screen')
+    try:
+        win = terminal.get_root()
+        zoomed = getattr(win, '_zoomed_unit', None) is not None
+    except Exception:
+        zoomed = False
+    if zoomed:
+        sec3.append(_('_Restore all terminals'), 'term.zoom')
+    else:
+        sec3.append(_('_Zoom terminal'), 'term.zoom')
+        sec3.append(_('Ma_ximize terminal'), 'term.maximize')
     menu.append_section(None, sec3)
 
     # Toggles / Preferences
@@ -57,8 +55,6 @@ def build_menu_model(terminal) -> Gio.MenuModel:
     sec4.append(_('_Read only'), 'term.toggle_readonly')
     sec4.append(_('Show _scrollbar'), 'term.toggle_scrollbar')
     sec4.append(_('_Preferences'), 'term.preferences')
-    sec4.append(_('New _Window'), 'term.new_window')
-    sec4.append(_('_Hide Window'), 'term.hide_window')
 
     # Profiles submenu
     profiles = sorted(cfg.list_profiles(), key=str.lower)
@@ -87,22 +83,23 @@ def build_menu_model(terminal) -> Gio.MenuModel:
 
     menu.append_section(None, sec4)
 
-    # Grouping
-    sec5 = Gio.Menu()
-    sec5.append(_('Create _Group…'), 'term.create_group')
-    sec5.append(_('Group all in _window'), 'term.group_all_window')
-    sec5.append(_('Ungroup all in w_indow'), 'term.ungroup_all_window')
-    sec5.append(_('Group all in _tab'), 'term.group_all_tab')
-    sec5.append(_('Ungroup all in t_ab'), 'term.ungroup_all_tab')
-
-    # Broadcast submenu
-    bmenu = Gio.Menu()
-    bmenu.append(_('Broadcast _off'), 'term.groupsend_off')
-    bmenu.append(_('Broadcast to _group'), 'term.groupsend_group')
-    bmenu.append(_('Broadcast to _all'), 'term.groupsend_all')
-    sec5.append_submenu(_('Broadcast'), bmenu)
-
-    menu.append_section(_('Grouping'), sec5)
+    # Grouping: only when titlebar hidden (match original)
+    try:
+        if not bool(cfg['show_titlebar']):
+            sec5 = Gio.Menu()
+            sec5.append(_('Create _Group…'), 'term.create_group')
+            sec5.append(_('Group all in _window'), 'term.group_all_window')
+            sec5.append(_('Ungroup all in w_indow'), 'term.ungroup_all_window')
+            sec5.append(_('Group all in _tab'), 'term.group_all_tab')
+            sec5.append(_('Ungroup all in t_ab'), 'term.ungroup_all_tab')
+            bmenu = Gio.Menu()
+            bmenu.append(_('Broadcast _off'), 'term.groupsend_off')
+            bmenu.append(_('Broadcast to _group'), 'term.groupsend_group')
+            bmenu.append(_('Broadcast to _all'), 'term.groupsend_all')
+            sec5.append_submenu(_('Broadcast'), bmenu)
+            menu.append_section(_('Grouping'), sec5)
+    except Exception:
+        pass
 
     # Plugins (if any)
     try:
@@ -146,10 +143,7 @@ def build_menu_model(terminal) -> Gio.MenuModel:
                             ag.add_action(act)
                 except Exception:
                     continue
-    # Help
-    secH = Gio.Menu()
-    secH.append(_('_Help'), 'term.help')
-    menu.append_section(None, secH)
+    # Help not present in original popup
 
     return menu
 

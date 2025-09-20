@@ -34,7 +34,7 @@ class TerminalShot(plugin.MenuItem):
         """Handle the taking, prompting and saving of a terminalshot"""
         # Try GTK4 snapshot path first
         orig_pixbuf = None
-        snapshot_tempfile = None
+        snapshot_texture = None
         try:
             # Render widget to a texture via GSK and save as PNG
             from gi.repository import Gsk, Graphene, Gdk
@@ -70,10 +70,10 @@ class TerminalShot(plugin.MenuItem):
             rect = Graphene.Rect()
             rect.init(0.0, 0.0, float(w), float(h))
             texture = renderer.render_texture(node, rect)
-            # Save texture directly to PNG path later
-            snapshot_tempfile = texture
+            # Keep texture for saving
+            snapshot_texture = texture
         except Exception:
-            snapshot_tempfile = None
+            snapshot_texture = None
 
         if snapshot_tempfile is None:
             # Fallback: GTK3 utility path using cairo/Gdk (may fail on GTK4)
@@ -146,13 +146,29 @@ class TerminalShot(plugin.MenuItem):
                 # Ensure .png extension
                 if not path.lower().endswith('.png'):
                     path += '.png'
-                if snapshot_tempfile is not None:
-                    # Save GdkTexture to PNG when available
+                if snapshot_texture is not None:
+                    # Prefer direct texture save; fallback to download+pixbuf
                     try:
-                        snapshot_tempfile.save_to_png(path)
+                        # GTK 4.10+: Gdk.Texture.save_to_png
+                        snapshot_texture.save_to_png(path)
                         return
                     except Exception:
-                        pass
+                        try:
+                            # Fallback: download pixel data and encode as PNG via Pixbuf
+                            from gi.repository import Gdk, GdkPixbuf, GLib
+                            w = snapshot_texture.get_width(); h = snapshot_texture.get_height()
+                            # Download returns bytes in RGBA
+                            data = bytearray(w*h*4)
+                            snapshot_texture.download(memoryview(data), w*4)
+                            pb = GdkPixbuf.Pixbuf.new_from_bytes(
+                                GLib.Bytes.new(bytes(data)),
+                                GdkPixbuf.Colorspace.RGB,
+                                True, 8, w, h, w*4
+                            )
+                            pb.savev(path, 'png', [], [])
+                            return
+                        except Exception:
+                            pass
                 # Fallback: save pixbuf
                 if orig_pixbuf is not None:
                     orig_pixbuf.savev(path, 'png', [], [])
