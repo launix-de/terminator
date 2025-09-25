@@ -40,10 +40,12 @@ pub type KeybindingMap = HashMap<ActionId, Vec<String>>;
 pub enum LayoutNode {
     Terminal(TerminalLeaf),
     Split(SplitNode),
+    #[allow(dead_code)]
     Tabs(TabGroup),
 }
 
 impl LayoutNode {
+    #[allow(dead_code)]
     pub fn id(&self) -> NodeId {
         match self {
             LayoutNode::Terminal(term) => term.id,
@@ -116,12 +118,14 @@ pub struct TerminalLeaf {
 
 #[derive(Clone, Debug)]
 pub struct SplitNode {
+    #[allow(dead_code)]
     pub id: NodeId,
     pub orientation: SplitOrientation,
     pub children: Vec<LayoutNode>,
     pub ratios: Vec<f32>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct TabGroup {
     pub id: NodeId,
@@ -129,6 +133,7 @@ pub struct TabGroup {
     pub active: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct InnerTab {
     pub id: InnerTabId,
@@ -136,6 +141,73 @@ pub struct InnerTab {
     pub root: LayoutNode,
     pub active_terminal: TerminalId,
     pub title_flexible: bool,
+}
+
+impl TabGroup {
+    pub fn display_title(&self) -> String {
+        self.tabs
+            .iter()
+            .map(|tab| tab.display_title())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    #[allow(dead_code)]
+    fn find_inner_tab_mut(&mut self, inner_id: InnerTabId) -> Option<&mut InnerTab> {
+        for tab in &mut self.tabs {
+            if tab.id == inner_id {
+                return Some(tab);
+            }
+            if let Some(found) = find_inner_tab_in_node(&mut tab.root, inner_id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+}
+
+impl InnerTab {
+    pub fn display_title(&self) -> String {
+        match &self.root {
+            LayoutNode::Tabs(group) => group.display_title(),
+            _ => self.title.clone(),
+        }
+    }
+
+    pub fn is_title_flexible(&self) -> bool {
+        match &self.root {
+            LayoutNode::Tabs(group) => group
+                .tabs
+                .get(group.active)
+                .map(|tab| tab.is_title_flexible())
+                .unwrap_or(false),
+            _ => self.title_flexible,
+        }
+    }
+
+    pub fn set_title(&mut self, title: String, flexible: bool) -> bool {
+        if matches!(self.root, LayoutNode::Tabs(_)) {
+            return false;
+        }
+        self.title = title;
+        self.title_flexible = flexible;
+        true
+    }
+
+    pub fn update_dynamic_title(&mut self, title: &str) {
+        match &mut self.root {
+            LayoutNode::Tabs(group) => {
+                if group.active < group.tabs.len() {
+                    group.tabs[group.active].update_dynamic_title(title);
+                }
+            }
+            _ => {
+                if self.title_flexible {
+                    self.title = title.to_string();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +226,33 @@ impl TabModel {
 
     pub fn contains_terminal(&self, terminal_id: TerminalId) -> bool {
         node_contains(&self.root, terminal_id)
+    }
+
+    pub fn display_title(&self) -> String {
+        match &self.root {
+            LayoutNode::Tabs(group) => group.display_title(),
+            _ => self.title.clone(),
+        }
+    }
+
+    pub fn is_title_flexible(&self) -> bool {
+        match &self.root {
+            LayoutNode::Tabs(group) => group
+                .tabs
+                .get(group.active)
+                .map(|tab| tab.is_title_flexible())
+                .unwrap_or(false),
+            _ => self.title_flexible,
+        }
+    }
+
+    pub fn set_title(&mut self, title: String, flexible: bool) -> bool {
+        if matches!(self.root, LayoutNode::Tabs(_)) {
+            return false;
+        }
+        self.title = title;
+        self.title_flexible = flexible;
+        true
     }
 
     pub fn split_terminal(
@@ -192,6 +291,36 @@ impl TabModel {
         }
 
         Some(Some(self.active_terminal))
+    }
+
+    pub fn update_dynamic_title(&mut self, title: &str) {
+        match &mut self.root {
+            LayoutNode::Tabs(group) => {
+                if group.active < group.tabs.len() {
+                    group.tabs[group.active].update_dynamic_title(title);
+                }
+            }
+            _ => {
+                if self.title_flexible {
+                    self.title = title.to_string();
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn rename_inner_tab(
+        &mut self,
+        inner_id: InnerTabId,
+        title: String,
+        flexible: bool,
+    ) -> bool {
+        rename_inner_tab_node(&mut self.root, inner_id, title, flexible)
+    }
+
+    #[allow(dead_code)]
+    pub fn update_inner_tab_dynamic_title(&mut self, inner_id: InnerTabId, title: &str) {
+        update_inner_tab_dynamic_title_node(&mut self.root, inner_id, title);
     }
 
     pub fn first_terminal(&self) -> Option<TerminalId> {
@@ -316,6 +445,7 @@ impl WorkspaceModel {
         };
 
         if tab.split_terminal(terminal_id, orientation, split_id, leaf) {
+            set_active_terminal_for_node(&mut tab.root, new_terminal_id);
             tab.active_terminal = new_terminal_id;
             window.active_tab = tab_index;
             Some(new_terminal_id)
@@ -368,6 +498,77 @@ impl WorkspaceModel {
             .find(|window| window.id == window_id)
         {
             window.set_active_tab(tab_id);
+        }
+    }
+
+    pub fn rename_tab(
+        &mut self,
+        window_id: WindowId,
+        tab_id: TabId,
+        title: String,
+        flexible: bool,
+    ) -> bool {
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        {
+            if let Some(tab) = window.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                return tab.set_title(title, flexible);
+            }
+        }
+        false
+    }
+
+    #[allow(dead_code)]
+    pub fn rename_inner_tab(
+        &mut self,
+        window_id: WindowId,
+        tab_id: TabId,
+        inner_id: InnerTabId,
+        title: String,
+        flexible: bool,
+    ) -> bool {
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        {
+            if let Some(tab) = window.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                return tab.rename_inner_tab(inner_id, title, flexible);
+            }
+        }
+        false
+    }
+
+    pub fn update_tab_dynamic_title(&mut self, window_id: WindowId, tab_id: TabId, title: &str) {
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        {
+            if let Some(tab) = window.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.update_dynamic_title(title);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn update_inner_tab_dynamic_title(
+        &mut self,
+        window_id: WindowId,
+        tab_id: TabId,
+        inner_id: InnerTabId,
+        title: &str,
+    ) {
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        {
+            if let Some(tab) = window.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.update_inner_tab_dynamic_title(inner_id, title);
+            }
         }
     }
 
@@ -545,6 +746,101 @@ fn find_terminal_node(node: &LayoutNode, terminal_id: TerminalId) -> Option<Node
     }
 }
 
+#[allow(dead_code)]
+fn rename_inner_tab_node(
+    node: &mut LayoutNode,
+    inner_id: InnerTabId,
+    title: String,
+    flexible: bool,
+) -> bool {
+    match node {
+        LayoutNode::Tabs(group) => {
+            if let Some(tab) = group.tabs.iter_mut().find(|t| t.id == inner_id) {
+                return tab.set_title(title, flexible);
+            }
+            for tab in &mut group.tabs {
+                if rename_inner_tab_node(&mut tab.root, inner_id, title.clone(), flexible) {
+                    return true;
+                }
+            }
+            false
+        }
+        LayoutNode::Split(split) => {
+            for child in &mut split.children {
+                if rename_inner_tab_node(child, inner_id, title.clone(), flexible) {
+                    return true;
+                }
+            }
+            false
+        }
+        LayoutNode::Terminal(_) => false,
+    }
+}
+
+#[allow(dead_code)]
+fn update_inner_tab_dynamic_title_node(node: &mut LayoutNode, inner_id: InnerTabId, title: &str) {
+    match node {
+        LayoutNode::Tabs(group) => {
+            if let Some(tab) = group.tabs.iter_mut().find(|t| t.id == inner_id) {
+                tab.update_dynamic_title(title);
+                return;
+            }
+            for tab in &mut group.tabs {
+                update_inner_tab_dynamic_title_node(&mut tab.root, inner_id, title);
+            }
+        }
+        LayoutNode::Split(split) => {
+            for child in &mut split.children {
+                update_inner_tab_dynamic_title_node(child, inner_id, title);
+            }
+        }
+        LayoutNode::Terminal(_) => {}
+    }
+}
+
+#[allow(dead_code)]
+fn find_inner_tab_in_node<'a>(
+    node: &'a mut LayoutNode,
+    inner_id: InnerTabId,
+) -> Option<&'a mut InnerTab> {
+    match node {
+        LayoutNode::Tabs(group) => group.find_inner_tab_mut(inner_id),
+        LayoutNode::Split(split) => {
+            for child in &mut split.children {
+                if let Some(found) = find_inner_tab_in_node(child, inner_id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        LayoutNode::Terminal(_) => None,
+    }
+}
+
+fn set_active_terminal_for_node(node: &mut LayoutNode, terminal_id: TerminalId) -> bool {
+    match node {
+        LayoutNode::Terminal(leaf) => leaf.terminal_id == terminal_id,
+        LayoutNode::Split(split) => {
+            for child in &mut split.children {
+                if set_active_terminal_for_node(child, terminal_id) {
+                    return true;
+                }
+            }
+            false
+        }
+        LayoutNode::Tabs(group) => {
+            for (idx, tab) in group.tabs.iter_mut().enumerate() {
+                if set_active_terminal_for_node(&mut tab.root, terminal_id) {
+                    tab.active_terminal = terminal_id;
+                    group.active = idx;
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
 pub fn default_keybindings() -> KeybindingMap {
     use ActionId::*;
     HashMap::from([
@@ -552,8 +848,8 @@ pub fn default_keybindings() -> KeybindingMap {
         (Paste, vec!["<Ctrl><Shift>V".into()]),
         (NewWindow, vec!["<Ctrl><Shift>N".into()]),
         (NewTab, vec!["<Ctrl><Shift>T".into()]),
-        (SplitHorizontal, vec!["<Ctrl><Shift>O".into()]),
-        (SplitVertical, vec!["<Ctrl><Shift>E".into()]),
+        (SplitHorizontal, vec!["<Ctrl><Shift>E".into()]),
+        (SplitVertical, vec!["<Ctrl><Shift>O".into()]),
         (Settings, vec!["<Ctrl><Shift>S".into()]),
         (Close, vec!["<Ctrl><Shift>W".into()]),
     ])

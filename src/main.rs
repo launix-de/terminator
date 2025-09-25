@@ -2,10 +2,10 @@ mod model;
 mod ui;
 
 use crate::model::{
-    ActionId, KeybindingMap, LayoutNode, SplitNode, SplitOrientation, TabGroup, TabId, TerminalId,
-    TerminalLeaf, WindowId, WindowModel, WorkspaceModel,
+    ActionId, InnerTabId, KeybindingMap, LayoutNode, SplitNode, SplitOrientation, TabGroup, TabId,
+    TerminalId, TerminalLeaf, WindowId, WindowModel, WorkspaceModel,
 };
-use crate::ui::EditableTitleBar;
+use crate::ui::{EditableTabLabel, EditableTitleBar};
 use glib::signal::{signal_handler_block, signal_handler_unblock};
 use gtk4::{
     Application, ApplicationWindow, Box, Dialog, Entry, EventControllerFocus, GestureClick,
@@ -188,6 +188,53 @@ impl AppState {
         }
     }
 
+    fn rename_tab(
+        self: &Rc<Self>,
+        window_id: WindowId,
+        tab_id: TabId,
+        title: String,
+        flexible: bool,
+    ) -> bool {
+        let changed = self
+            .workspace
+            .borrow_mut()
+            .rename_tab(window_id, tab_id, title, flexible);
+        if changed {
+            let weak = Rc::downgrade(self);
+            glib::idle_add_local(move || {
+                if let Some(controller) = weak.upgrade() {
+                    controller.rebuild_window(window_id);
+                }
+                glib::ControlFlow::Break
+            });
+        }
+        changed
+    }
+
+    fn rename_inner_tab(
+        self: &Rc<Self>,
+        window_id: WindowId,
+        tab_id: TabId,
+        inner_id: InnerTabId,
+        title: String,
+        flexible: bool,
+    ) -> bool {
+        let changed = self
+            .workspace
+            .borrow_mut()
+            .rename_inner_tab(window_id, tab_id, inner_id, title, flexible);
+        if changed {
+            let weak = Rc::downgrade(self);
+            glib::idle_add_local(move || {
+                if let Some(controller) = weak.upgrade() {
+                    controller.rebuild_window(window_id);
+                }
+                glib::ControlFlow::Break
+            });
+        }
+        changed
+    }
+
     fn close_active(self: &Rc<Self>, window_id: WindowId) {
         let active_terminal = {
             let ws = self.workspace.borrow();
@@ -202,10 +249,35 @@ impl AppState {
     }
 
     fn set_active_tab(self: &Rc<Self>, window_id: WindowId, tab_id: TabId) {
+        let already_active = {
+            let ws = self.workspace.borrow();
+            ws.windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .and_then(|window| {
+                    window
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == tab_id)
+                        .map(|idx| idx == window.active_tab)
+                })
+                .unwrap_or(false)
+        };
+        if already_active {
+            return;
+        }
+
         self.workspace
             .borrow_mut()
             .set_active_tab(window_id, tab_id);
-        self.rebuild_window(window_id);
+
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local(move || {
+            if let Some(controller) = weak.upgrade() {
+                controller.rebuild_window(window_id);
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn set_active_terminal(
@@ -228,6 +300,7 @@ impl AppState {
         apply_keybindings(&self.app, &bindings);
     }
 
+    #[allow(deprecated)]
     fn open_settings_dialog(self: &Rc<Self>, parent: &ApplicationWindow) {
         let dialog = Dialog::builder()
             .title("Keyboard Shortcuts")
@@ -336,6 +409,8 @@ struct WorkspaceController {
     page_tab_ids: RefCell<Vec<TabId>>,
     title_handler: RefCell<Option<(Terminal, glib::SignalHandlerId, glib::SignalHandlerId)>>,
     switch_handler: RefCell<Option<glib::SignalHandlerId>>,
+    tab_labels: RefCell<HashMap<TabId, EditableTabLabel>>,
+    inner_tab_labels: RefCell<HashMap<InnerTabId, EditableTabLabel>>,
 }
 
 impl WorkspaceController {
@@ -350,9 +425,9 @@ impl WorkspaceController {
         };
 
         let active_tab = window_model.active_tab();
-        let title_text = format!("{} — {}", window_model.title, active_tab.title);
+        let title_text = format!("{} — {}", window_model.title, active_tab.display_title());
         let title_bar = EditableTitleBar::new(title_text.clone(), window_model.title.clone());
-        title_bar.set_flexible(active_tab.title_flexible);
+        title_bar.set_flexible(active_tab.is_title_flexible());
 
         let window = ApplicationWindow::builder()
             .application(&state.app)
@@ -387,6 +462,8 @@ impl WorkspaceController {
             page_tab_ids: RefCell::new(Vec::new()),
             title_handler: RefCell::new(None),
             switch_handler: RefCell::new(None),
+            tab_labels: RefCell::new(HashMap::new()),
+            inner_tab_labels: RefCell::new(HashMap::new()),
         });
 
         controller.install_actions();
@@ -510,19 +587,24 @@ impl WorkspaceController {
             .connect_committed(move |is_custom, new_title| {
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
-                        let mut workspace = state.workspace.borrow_mut();
-                        if let Some(window) = workspace
-                            .windows
-                            .iter_mut()
-                            .find(|w| w.id == controller.window_id)
-                        {
-                            if let Some(tab) = window.tabs.get_mut(window.active_tab) {
-                                tab.title = new_title.clone();
-                                tab.title_flexible = !is_custom;
-                            }
+                        let tab_id = {
+                            let workspace = state.workspace.borrow();
+                            workspace
+                                .windows
+                                .iter()
+                                .find(|w| w.id == controller.window_id)
+                                .and_then(|window| window.tabs.get(window.active_tab))
+                                .map(|tab| tab.id)
+                        };
+                        if let Some(tab_id) = tab_id {
+                            let flexible = !is_custom;
+                            state.rename_tab(
+                                controller.window_id,
+                                tab_id,
+                                new_title.clone(),
+                                flexible,
+                            );
                         }
-                        drop(workspace);
-                        state.rebuild_window(controller.window_id);
                     }
                 }
             });
@@ -531,12 +613,11 @@ impl WorkspaceController {
         let handler = self.notebook.connect_switch_page(move |_, _, index| {
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    if let Some(tab_id) = controller
-                        .page_tab_ids
-                        .borrow()
-                        .get(index as usize)
-                        .cloned()
-                    {
+                    let tab_id = {
+                        let ids = controller.page_tab_ids.borrow();
+                        ids.get(index as usize).cloned()
+                    };
+                    if let Some(tab_id) = tab_id {
                         state.set_active_tab(controller.window_id, tab_id);
                     }
                 }
@@ -564,24 +645,29 @@ impl WorkspaceController {
         self.window.set_title(Some(&window_model.title));
 
         let active_tab = window_model.active_tab();
-        let title_text = format!("{} — {}", window_model.title, active_tab.title);
-        self.title_bar
-            .set_titles(&title_text, &window_model.title, active_tab.title_flexible);
+        let title_text = format!("{} — {}", window_model.title, active_tab.display_title());
+        self.title_bar.set_titles(
+            &title_text,
+            &window_model.title,
+            active_tab.is_title_flexible(),
+        );
 
         if let Some(handler_id) = self.switch_handler.borrow().as_ref() {
             signal_handler_block(&self.notebook, handler_id);
             self.refresh_notebook(window_model.clone());
+            self.notebook.set_show_tabs(window_model.tabs.len() > 1);
+            self.notebook
+                .set_current_page(Some(window_model.active_tab as u32));
             signal_handler_unblock(&self.notebook, handler_id);
         } else {
             self.refresh_notebook(window_model.clone());
+            self.notebook.set_show_tabs(window_model.tabs.len() > 1);
+            self.notebook
+                .set_current_page(Some(window_model.active_tab as u32));
         }
 
-        self.notebook.set_show_tabs(window_model.tabs.len() > 1);
-        self.notebook
-            .set_current_page(Some(window_model.active_tab as u32));
-
         let terminal_id = active_tab.active_terminal();
-        self.bind_active_terminal(terminal_id, active_tab.title_flexible);
+        self.bind_active_terminal(terminal_id, active_tab.is_title_flexible());
 
         let keep_ids: Vec<TerminalId> = window_model
             .tabs
@@ -704,9 +790,33 @@ impl WorkspaceController {
             let page = self.build_node(tab_id, &inner.root, false);
             page.set_hexpand(true);
             page.set_vexpand(true);
-            let label = Label::new(Some(&inner.title));
-            label.set_xalign(0.0);
-            notebook.append_page(&page, Some(&label));
+
+            let inner_label =
+                EditableTabLabel::new(inner.display_title(), inner.is_title_flexible());
+            let label_widget = inner_label.widget();
+
+            let weak_self = Rc::downgrade(self);
+            let inner_id = inner.id;
+            inner_label.connect_committed(move |is_custom, new_title| {
+                if let Some(controller) = weak_self.upgrade() {
+                    if let Some(state) = controller.state.upgrade() {
+                        let flexible = !is_custom;
+                        state.rename_inner_tab(
+                            controller.window_id,
+                            tab_id,
+                            inner_id,
+                            new_title.clone(),
+                            flexible,
+                        );
+                    }
+                }
+            });
+
+            self.inner_tab_labels
+                .borrow_mut()
+                .insert(inner.id, inner_label);
+
+            notebook.append_page(&page, Some(&label_widget));
         }
 
         notebook.set_show_tabs(group.tabs.len() > 1);
@@ -720,6 +830,9 @@ impl WorkspaceController {
             self.notebook.remove_page(Some(0));
         }
 
+        self.tab_labels.borrow_mut().clear();
+        self.inner_tab_labels.borrow_mut().clear();
+
         let mut new_page_ids = Vec::with_capacity(window_model.tabs.len());
 
         for tab in &window_model.tabs {
@@ -727,10 +840,22 @@ impl WorkspaceController {
             page.set_hexpand(true);
             page.set_vexpand(true);
 
-            let label = Label::new(Some(&tab.title));
-            label.set_xalign(0.0);
+            let tab_label = EditableTabLabel::new(tab.display_title(), tab.is_title_flexible());
+            let label_widget = tab_label.widget();
 
-            self.notebook.append_page(&page, Some(&label));
+            let weak_self = Rc::downgrade(self);
+            let tab_id = tab.id;
+            tab_label.connect_committed(move |is_custom, new_title| {
+                if let Some(controller) = weak_self.upgrade() {
+                    if let Some(state) = controller.state.upgrade() {
+                        let flexible = !is_custom;
+                        state.rename_tab(controller.window_id, tab_id, new_title.clone(), flexible);
+                    }
+                }
+            });
+
+            self.notebook.append_page(&page, Some(&label_widget));
+            self.tab_labels.borrow_mut().insert(tab.id, tab_label);
             new_page_ids.push(tab.id);
         }
 
@@ -813,9 +938,52 @@ impl WorkspaceController {
             .cloned();
         if let Some(window_model) = window_model {
             let active_tab = window_model.active_tab();
-            let fallback = format!("{} — {}", window_model.title, active_tab.title);
+            let tab_id = active_tab.id;
+            let fallback = format!("{} — {}", window_model.title, active_tab.display_title());
+            drop(workspace);
             let dynamic = format_terminal_title(terminal, &fallback, flexible);
             self.title_bar.update_dynamic(Some(&dynamic));
+
+            state
+                .workspace
+                .borrow_mut()
+                .update_tab_dynamic_title(self.window_id, tab_id, &dynamic);
+
+            if let Some((title, flex, inner_active)) = {
+                let ws = state.workspace.borrow();
+                ws.windows
+                    .iter()
+                    .find(|w| w.id == self.window_id)
+                    .and_then(|window| {
+                        window.tabs.iter().find(|tab| tab.id == tab_id).map(|tab| {
+                            let inner = match &tab.root {
+                                LayoutNode::Tabs(group) => {
+                                    group.tabs.get(group.active).map(|inner| {
+                                        (inner.id, inner.display_title(), inner.is_title_flexible())
+                                    })
+                                }
+                                _ => None,
+                            };
+                            (tab.display_title(), tab.is_title_flexible(), inner)
+                        })
+                    })
+            } {
+                if let Some(label) = self.tab_labels.borrow().get(&tab_id) {
+                    label.set_text(&title, flex);
+                    if flex {
+                        label.update_dynamic(Some(&title));
+                    }
+                }
+
+                if let Some((inner_id, inner_title, inner_flex)) = inner_active {
+                    if let Some(label) = self.inner_tab_labels.borrow().get(&inner_id) {
+                        label.set_text(&inner_title, inner_flex);
+                        if inner_flex {
+                            label.update_dynamic(Some(&inner_title));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -989,6 +1157,7 @@ impl TerminalEntry {
     }
 }
 
+#[allow(deprecated)]
 fn setup_terminal_theme(terminal: &Terminal) {
     apply_terminal_theme(terminal);
 
@@ -997,6 +1166,7 @@ fn setup_terminal_theme(terminal: &Terminal) {
     });
 }
 
+#[allow(deprecated)]
 fn apply_terminal_theme(terminal: &Terminal) {
     if let Some((fg, bg)) = widget_theme_colors(terminal) {
         terminal.set_colors(Some(&fg), Some(&bg), &[]);
@@ -1010,6 +1180,7 @@ fn apply_terminal_theme(terminal: &Terminal) {
     }
 }
 
+#[allow(deprecated)]
 fn widget_theme_colors<W: IsA<gtk4::Widget>>(widget: &W) -> Option<(RGBA, RGBA)> {
     let widget_ref = widget.as_ref();
     let context = widget_ref.style_context();
@@ -1035,6 +1206,7 @@ fn mix_colors(a: &RGBA, b: &RGBA, factor: f32) -> RGBA {
     )
 }
 
+#[allow(deprecated)]
 fn colors_from_context(context: &StyleContext) -> Option<(RGBA, RGBA)> {
     let fg = context
         .lookup_color("theme_fg_color")
@@ -1051,6 +1223,7 @@ fn colors_from_context(context: &StyleContext) -> Option<(RGBA, RGBA)> {
     }
 }
 
+#[allow(deprecated)]
 fn ensure_custom_css() {
     CUSTOM_CSS_PROVIDER.with(|cell| {
         if cell.borrow().is_some() {
