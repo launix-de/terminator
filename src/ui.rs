@@ -49,6 +49,8 @@ impl EditableTitleBar {
             last_dynamic: RefCell::new(initial_title.clone()),
             edit_callback: RefCell::new(None),
             fallback: RefCell::new(fallback_title),
+            editing_original: RefCell::new(String::new()),
+            editing_was_custom: Cell::new(false),
         });
 
         inner.setup_interactions();
@@ -95,6 +97,8 @@ struct EditableTitleBarInner {
     last_dynamic: RefCell<String>,
     edit_callback: RefCell<Option<StdBox<dyn Fn(bool, String)>>>,
     fallback: RefCell<String>,
+    editing_original: RefCell<String>,
+    editing_was_custom: Cell<bool>,
 }
 
 impl EditableTitleBarInner {
@@ -135,6 +139,8 @@ impl EditableTitleBarInner {
         } else {
             self.last_dynamic.borrow().clone()
         };
+        self.editing_original.replace(current.clone());
+        self.editing_was_custom.set(self.is_custom.get());
         self.entry.set_text(&current);
         self.stack.set_visible_child_name("entry");
         self.entry.select_region(0, -1);
@@ -143,7 +149,9 @@ impl EditableTitleBarInner {
 
     fn finish_edit(&self, value: Option<String>) {
         let text = value.unwrap_or_default().trim().to_string();
-        if text.is_empty() {
+        let was_custom = self.editing_was_custom.get();
+        let original = self.editing_original.borrow().clone();
+        if text.is_empty() || (!was_custom && text == original) {
             self.is_custom.set(false);
             self.flexible.set(true);
             self.label.set_text(&self.last_dynamic.borrow());
@@ -151,7 +159,7 @@ impl EditableTitleBarInner {
             self.is_custom.set(true);
             self.flexible.set(false);
             self.label.set_text(&text);
-            *self.last_dynamic.borrow_mut() = text.clone();
+            *self.fallback.borrow_mut() = text.clone();
         }
         if let Some(callback) = &*self.edit_callback.borrow() {
             callback(self.is_custom.get(), self.label.text().to_string());
