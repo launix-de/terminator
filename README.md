@@ -1,97 +1,91 @@
-Terminator
-==========
+# Terminator 2
 
-Started by Chris Jones <cmsj@tenshu.net> in 2007, maintained from 2014 to 2020 by Stephen Boddy, currently maintained by Matt Rose. Terminator has had contributions from countless others listed in the [AUTHORS](AUTHORS) file
+Terminator 2 is a next-generation terminal emulator being rewritten in Rust on
+ top of GTK 4, VTE, and the modern GNOME stack. The goal is to recreate and
+ extend the powerful tiling, grouping, and broadcasting workflow of the original
+ Terminator while modernising the codebase and user experience.
 
-## Description
+This repository currently contains the initial prototype: a GTK 4 window with a
+terminator titlebar and embedded VTE widget. The long-term specification is
+captured in `specs.md`.
 
-Terminator was originally developed by Chris Jones in 2007 as a simple, 300-ish line python script.  Since then, it has become The Robot Future of Terminals.  Originally inspired by projects like quadkonsole and gnome-multi-term and more recently by projects like Iterm2, and Tilix, It lets you combine and recombine terminals to suit the style you like.  If you live at the command-line, or are logged into 10 different remote machines at once, you should definitely try out Terminator.
+## Project Status
+- ✅ Rust + GTK 4 application skeleton
+- ✅ Embedded VTE terminal widget
+- 🚧 Layout, grouping, configuration, and DBus features (see `specs.md`)
 
-When you run **`Terminator`**, you will get a terminal in a window, just like almost 
-every other terminal emulator available. There is also a titlebar which will
-update as shells/programs inside the terminal tell it to. Also on the titlebar
-is a small button that opens the grouping menu. From here you can put terminals
-into groups, which allows you to control multiple terminals simultaneously.
+## Build Requirements
+Terminator 2 links against GTK 4, Graphene, and the GTK 4 flavour of VTE. You
+need both the Rust toolchain (rustc/cargo 1.90 or newer) and the native
+libraries.
 
-## New home on GitHub
+On Debian/Ubuntu you can install GTK and Graphene from packages:
 
-In April of 2020 we started moving **`Terminator`** to GitHub. A new team wanted to continue the work of the original authors.
+```bash
+sudo apt install libgtk-4-dev libgraphene-1.0-dev
+```
 
-You can find the project on https://github.com/gnome-terminator/terminator
+As of late 2024, the GTK 4 VTE bindings (`vte-2.91-gtk4.pc`) are not available
+in the stable Debian/Ubuntu archives. To satisfy the Rust `vte4` crate you need
+VTE built with GTK 4 support. Options:
 
-## Installing
+1. **Use a distro package if available** (e.g. `libvte-2.91-gtk4-dev`). After
+   installation verify with:
+   ```bash
+   pkg-config --modversion vte-2.91-gtk4
+   ```
 
-Terminator is available for most (if not all) Linux distributions from the distribution's repository of binary packages.  It is also available on FreeBSD.   Please search your repository for `terminator`  If you want to find information on how to enable an updated package repository for your OS, build from source, or want to run the bleeding-edge master version, you can follow the instructions in [INSTALL.md](https://github.com/gnome-terminator/terminator/blob/master/INSTALL.md)
+2. **Build VTE from source**:
+   ```bash
+   sudo apt install build-essential meson ninja-build libgtk-4-dev \
+        gobject-introspection libpcre2-dev libgnutls28-dev valac
+   git clone https://gitlab.gnome.org/GNOME/vte.git
+   cd vte
+   meson setup build -Dgtk4=true
+   ninja -C build
+   sudo ninja -C build install
+   ```
+   Ensure `pkg-config` can find the new `.pc` file:
+   ```bash
+   export PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+   pkg-config --modversion vte-2.91-gtk4
+   ```
 
+Once the command prints a version number, you are ready to build Terminator 2.
 
-#### Quick Start:
+## Building
+Build a release binary in the repository root:
 
-Create more terminals by:  
- - horizontal split: `Ctrl-Shift-o`
- - vertical split: `Ctrl-Shift-e`
+```bash
+make
+```
 
-Shift focus to:  
- - next terminal: `Ctrl-Shift-n`
- - previous terminal: `Ctrl-Shift-p`
+This compiles with `cargo build --release` and copies the resulting binary to
+`./terminator2`.
 
-New tab: `Ctrl-Shift-t`
+For iterative development you can use:
 
-New window: `Ctrl-Shift-i`
+```bash
+cargo run        # debug build
+cargo build      # debug build only
+cargo build --release
+```
 
-Close terminal or tab:  
- - `Ctrl-Shift-w`
- - or right mouse click -> Close  
+## Running
+After `make` completes, launch the prototype with:
 
-Close window with all it's terminals and tabs: `Ctrl-Shift-q`
+```bash
+./terminator2
+```
 
-Reset zoom: `Ctrl-0`
+You should see a GTK window titled “Terminator 2” with a single VTE terminal
+embedded in the content area.
 
-Terminator Preferences menu:  
- - right mouse click -> Preferences  
-
-These and more modifiable shortcuts in:  
- - right mouse click -> Preferences -> Keybindings tab  
-
-Web Documentation: 
- - press `F1` or at https://gnome-terminator.readthedocs.io/en/latest/
-
-More info about shortcuts and cli config in man pages:  
- - `man terminator`
- - `man terminator_config`
+## Specification
+The full functional specification – covering tiling layouts, grouping,
+configuration, DBus control, plugin architecture, and more – is maintained in
+[`specs.md`](specs.md). The implementation roadmap follows that document.
 
 ## Contributing
-
-Any help is welcome with the Terminator project.
-
-* [Open issues for bugs or enhancements](https://github.com/gnome-terminator/terminator/issues/new)
-* [Join our chat room on gitter.im for general questions](https://gitter.im/gnome-terminator/community)
-* [Help translating Terminator](TRANSLATION.md)
-
-You can find old bugs and questions in the launchpad project, but please don't post anything new there.
-
-* https://answers.launchpad.net/terminator
-* https://bugs.launchpad.net/terminator
-
-## Origins
-
-Terminator began by shamelessly copying code from the vte-demo.py in the vte 
-widget package, and the gedit terminal plugin (which was fantastically 
-useful at figuring out vte's API).
-
-vte-demo.py was not my code and is copyright its original author. While it 
-does not contain any specific licensing information in it, the VTE package 
-appears to be licenced under LGPL v2.
-
-The original version 0.1 release of Terminator was on Saturday, 28 July 2007.
- [Here is the archived Terminator 0.1 release announcement](http://cmsj.net/2007/07/28/terminator-01-released.html)
-
-## Licensing
-
-The gedit terminal plugin is part of the gedit-plugins package, which is 
-licenced under GPL v2 or later.
-
-I am thus licensing Terminator as GPL v2 only.
-
-Cristian Grada provided the old icon under the same licence.
-Cory Kontros provided the new icon under the CC-by-SA licence.
-For other authorship information, see debian/copyright
+Development is in its early stages. Bug reports, ideas, and pull requests are
+welcome; please review the spec and align changes with the planned architecture.
