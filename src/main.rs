@@ -1,14 +1,25 @@
 mod model;
 mod ui;
 
-use crate::model::{TabId, WorkspaceModel};
+use crate::model::{ActionId, KeybindingMap, TabId, WindowId, WorkspaceModel};
 use gtk4::{
-    Application, ApplicationWindow, Box, GestureClick, Orientation, PopoverMenu, gdk, gio, glib,
-    prelude::*,
+    Application, ApplicationWindow, Box, Dialog, Entry, GestureClick, Label, ListBox, ListBoxRow,
+    Orientation, PopoverMenu, ResponseType, gdk, gio, glib, prelude::*,
 };
 use std::{cell::RefCell, rc::Rc};
 use ui::EditableTitleBar;
 use vte4::{Format, PtyFlags, Terminal, prelude::*};
+
+const ACTION_DEFS: &[(ActionId, &str)] = &[
+    (ActionId::Copy, "Copy"),
+    (ActionId::Paste, "Paste"),
+    (ActionId::NewWindow, "New Window"),
+    (ActionId::NewTab, "New Tab"),
+    (ActionId::SplitHorizontal, "Split Horizontally"),
+    (ActionId::SplitVertical, "Split Vertically"),
+    (ActionId::Settings, "Settings"),
+    (ActionId::Close, "Close"),
+];
 
 fn main() -> gtk4::glib::ExitCode {
     let app = Application::builder()
@@ -16,27 +27,45 @@ fn main() -> gtk4::glib::ExitCode {
         .flags(gio::ApplicationFlags::empty())
         .build();
 
-    let state = WorkspaceModel::new_single_terminal();
-    let workspace = Rc::new(RefCell::new(state));
+    let workspace = Rc::new(RefCell::new(WorkspaceModel::new_single_terminal()));
 
-    app.connect_activate(move |app| build_ui(app, workspace.clone()));
+    let workspace_activate = workspace.clone();
+    app.connect_activate(move |app| {
+        apply_keybindings(app, &workspace_activate.borrow().keybindings);
+        let window_ids: Vec<WindowId> = {
+            let ws = workspace_activate.borrow();
+            ws.windows.iter().map(|w| w.id).collect()
+        };
+        if window_ids.is_empty() {
+            let id = workspace_activate.borrow_mut().add_window();
+            open_window(app, workspace_activate.clone(), id);
+        } else {
+            for id in window_ids {
+                open_window(app, workspace_activate.clone(), id);
+            }
+        }
+    });
 
     app.run()
 }
 
-fn build_ui(app: &Application, state: Rc<RefCell<WorkspaceModel>>) {
-    let state_ref = state.borrow();
-    let window_model = state_ref
-        .windows
-        .first()
-        .expect("workspace must contain at least one window");
-    let tab_model = window_model.active_tab();
+fn open_window(app: &Application, workspace: Rc<RefCell<WorkspaceModel>>, window_id: WindowId) {
+    let (window_title, tab_model) = {
+        let ws = workspace.borrow();
+        let window_model = ws
+            .windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .expect("workspace must contain specified window");
+        (
+            window_model.title.clone(),
+            window_model.active_tab().clone(),
+        )
+    };
+
     let tab_title = tab_model.title.clone();
-    let window_title = window_model.title.clone();
-    let _terminal_id = tab_model.active_terminal();
     let flexible_title = tab_model.title_flexible;
     let tab_id = tab_model.id;
-    drop(state_ref);
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -61,7 +90,7 @@ fn build_ui(app: &Application, state: Rc<RefCell<WorkspaceModel>>) {
         flexible_title,
     );
     spawn_shell(&terminal);
-    install_terminal_menu(&terminal, &window);
+    install_terminal_menu(&terminal, &window, workspace.clone(), app);
 
     let container = Box::new(Orientation::Vertical, 0);
     container.append(&terminal);
@@ -72,7 +101,13 @@ fn build_ui(app: &Application, state: Rc<RefCell<WorkspaceModel>>) {
     window.set_titlebar(Some(&headerbar));
     window.set_child(Some(&container));
 
-    connect_title_commit(&state, tab_id, &title_bar);
+    connect_title_commit(&workspace, tab_id, &title_bar);
+
+    let workspace_close = workspace.clone();
+    window.connect_close_request(move |_win| {
+        workspace_close.borrow_mut().remove_window(window_id);
+        glib::Propagation::Proceed
+    });
 
     window.present();
 }
@@ -130,7 +165,12 @@ fn attach_terminal_handlers(
     });
 }
 
-fn install_terminal_menu(terminal: &Terminal, window: &ApplicationWindow) {
+fn install_terminal_menu(
+    terminal: &Terminal,
+    window: &ApplicationWindow,
+    workspace: Rc<RefCell<WorkspaceModel>>,
+    app: &Application,
+) {
     let action_group = gio::SimpleActionGroup::new();
 
     let term_for_copy = terminal.clone();
@@ -146,6 +186,14 @@ fn install_terminal_menu(terminal: &Terminal, window: &ApplicationWindow) {
         term_for_paste.paste_clipboard();
     });
     action_group.add_action(&paste);
+
+    let app_for_new = app.clone();
+    let workspace_for_new = workspace.clone();
+    let new_window = gio::SimpleAction::new("new_window", None);
+    new_window.connect_activate(move |_, _| {
+        create_workspace_window(&app_for_new, workspace_for_new.clone());
+    });
+    action_group.add_action(&new_window);
 
     let new_tab = gio::SimpleAction::new("new_tab", None);
     new_tab.connect_activate(|_, _| {
@@ -165,51 +213,79 @@ fn install_terminal_menu(terminal: &Terminal, window: &ApplicationWindow) {
     });
     action_group.add_action(&split_v);
 
-    let win_for_close = window.clone();
+    let window_for_close = window.clone();
     let close = gio::SimpleAction::new("close", None);
     close.connect_activate(move |_, _| {
-        win_for_close.close();
+        window_for_close.close();
     });
     action_group.add_action(&close);
 
+    let app_for_settings = app.clone();
+    let workspace_for_settings = workspace.clone();
+    let window_for_settings = window.clone();
     let settings = gio::SimpleAction::new("settings", None);
-    settings.connect_activate(|_, _| {
-        println!("Settings requested (not yet implemented)");
+    settings.connect_activate(move |_, _| {
+        open_settings_dialog(
+            &app_for_settings,
+            workspace_for_settings.clone(),
+            &window_for_settings,
+        );
     });
     action_group.add_action(&settings);
 
     window.insert_action_group("term", Some(&action_group));
 
-    let menu = gio::Menu::new();
-    let section_primary = gio::Menu::new();
-    section_primary.append(Some("Copy"), Some("term.copy"));
-    section_primary.append(Some("Paste"), Some("term.paste"));
-
-    let section_layout = gio::Menu::new();
-    section_layout.append(Some("New Tab"), Some("term.new_tab"));
-    section_layout.append(Some("Split Horizontally"), Some("term.split_h"));
-    section_layout.append(Some("Split Vertically"), Some("term.split_v"));
-
-    let section_secondary = gio::Menu::new();
-    section_secondary.append(Some("Settings"), Some("term.settings"));
-    section_secondary.append(Some("Close"), Some("term.close"));
-
-    menu.append_section(None, &section_primary);
-    menu.append_section(None, &section_layout);
-    menu.append_section(None, &section_secondary);
-
-    let popover = PopoverMenu::from_model(Some(&menu));
-    popover.set_has_arrow(false);
-    popover.set_parent(&terminal.clone());
-
-    let popover_clone = popover.clone();
+    let workspace_for_menu = workspace.clone();
+    let terminal_widget = terminal.clone();
     let gesture = GestureClick::new();
     gesture.set_button(3);
-    gesture.connect_pressed(move |_gesture, _, x, y| {
-        popover_clone.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-        popover_clone.popup();
+    gesture.connect_pressed(move |gesture, _, x, y| {
+        let bindings = workspace_for_menu.borrow().keybindings.clone();
+        let menu = build_context_menu(&bindings);
+        let popover = PopoverMenu::from_model(Some(&menu));
+        popover.set_has_arrow(false);
+        popover.set_parent(&terminal_widget);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.popup();
+        gesture.set_state(gtk4::EventSequenceState::Claimed);
     });
     terminal.add_controller(gesture);
+}
+
+fn build_context_menu(bindings: &KeybindingMap) -> gio::Menu {
+    use ActionId::*;
+
+    let menu = gio::Menu::new();
+
+    let primary = gio::Menu::new();
+    primary.append_item(&menu_item(Copy, "term.copy", bindings));
+    primary.append_item(&menu_item(Paste, "term.paste", bindings));
+
+    let layout = gio::Menu::new();
+    layout.append_item(&menu_item(NewWindow, "term.new_window", bindings));
+    layout.append_item(&menu_item(NewTab, "term.new_tab", bindings));
+    layout.append_item(&menu_item(SplitHorizontal, "term.split_h", bindings));
+    layout.append_item(&menu_item(SplitVertical, "term.split_v", bindings));
+
+    let secondary = gio::Menu::new();
+    secondary.append_item(&menu_item(Settings, "term.settings", bindings));
+    secondary.append_item(&menu_item(Close, "term.close", bindings));
+
+    menu.append_section(None, &primary);
+    menu.append_section(None, &layout);
+    menu.append_section(None, &secondary);
+
+    menu
+}
+
+fn menu_item(action: ActionId, detailed: &str, bindings: &KeybindingMap) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(action_label(action)), Some(detailed));
+    if let Some(accels) = bindings.get(&action) {
+        if let Some(accel) = accels.first() {
+            item.set_attribute_value("accel", Some(&glib::Variant::from(accel.as_str())));
+        }
+    }
+    item
 }
 
 fn spawn_shell(terminal: &Terminal) {
@@ -231,4 +307,126 @@ fn spawn_shell(terminal: &Terminal) {
             eprintln!("Failed to spawn shell: {error}");
         }
     });
+}
+
+fn create_workspace_window(app: &Application, workspace: Rc<RefCell<WorkspaceModel>>) -> WindowId {
+    let id = workspace.borrow_mut().add_window();
+    apply_keybindings(app, &workspace.borrow().keybindings);
+    open_window(app, workspace, id);
+    id
+}
+
+#[allow(deprecated)]
+fn open_settings_dialog(
+    app: &Application,
+    workspace: Rc<RefCell<WorkspaceModel>>,
+    parent: &ApplicationWindow,
+) {
+    let dialog = Dialog::builder()
+        .title("Keyboard Shortcuts")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(420)
+        .default_height(360)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Save", ResponseType::Ok);
+
+    let content = dialog.content_area();
+    let list = ListBox::new();
+    list.set_selection_mode(gtk4::SelectionMode::None);
+
+    let bindings = workspace.borrow().keybindings.clone();
+    let mut editors: Vec<(ActionId, Entry)> = Vec::new();
+
+    for (action, label_text) in ACTION_DEFS.iter() {
+        let row = ListBoxRow::new();
+        let row_box = Box::new(Orientation::Horizontal, 12);
+        let label = Label::new(Some(label_text));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        let entry = Entry::new();
+        if let Some(accels) = bindings.get(action) {
+            if let Some(accel) = accels.first() {
+                entry.set_text(accel);
+            }
+        }
+        entry.set_placeholder_text(Some("<Ctrl><Shift>T"));
+        row_box.append(&label);
+        row_box.append(&entry);
+        row.set_child(Some(&row_box));
+        list.append(&row);
+        editors.push((*action, entry));
+    }
+
+    content.append(&list);
+
+    let editors = Rc::new(editors);
+    let workspace_store = workspace.clone();
+    let app_clone = app.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Ok {
+            let mut new_bindings = workspace_store.borrow().keybindings.clone();
+            let mut valid = true;
+            for (action, entry) in editors.iter() {
+                let text = entry.text().trim().to_string();
+                if text.is_empty() {
+                    entry.remove_css_class("error");
+                    new_bindings.insert(*action, Vec::new());
+                    continue;
+                }
+                if let Some((key, mods)) = gtk4::accelerator_parse(&text) {
+                    entry.remove_css_class("error");
+                    let normalized = gtk4::accelerator_name(key, mods);
+                    new_bindings.insert(*action, vec![normalized.to_string()]);
+                } else {
+                    entry.add_css_class("error");
+                    valid = false;
+                }
+            }
+            if valid {
+                workspace_store.borrow_mut().keybindings = new_bindings.clone();
+                apply_keybindings(&app_clone, &new_bindings);
+                dialog.close();
+            }
+        } else {
+            dialog.close();
+        }
+    });
+
+    dialog.show();
+}
+
+fn apply_keybindings(app: &Application, bindings: &KeybindingMap) {
+    for action in ACTION_DEFS.iter().map(|(id, _)| *id) {
+        let name = action_name(action);
+        if let Some(accels) = bindings.get(&action) {
+            let refs: Vec<&str> = accels.iter().map(|s| s.as_str()).collect();
+            app.set_accels_for_action(name, &refs);
+        } else {
+            app.set_accels_for_action(name, &[]);
+        }
+    }
+}
+
+fn action_name(action: ActionId) -> &'static str {
+    use ActionId::*;
+    match action {
+        Copy => "term.copy",
+        Paste => "term.paste",
+        NewWindow => "term.new_window",
+        NewTab => "term.new_tab",
+        SplitHorizontal => "term.split_h",
+        SplitVertical => "term.split_v",
+        Settings => "term.settings",
+        Close => "term.close",
+    }
+}
+
+fn action_label(action: ActionId) -> &'static str {
+    ACTION_DEFS
+        .iter()
+        .find(|(id, _)| *id == action)
+        .map(|(_, label)| *label)
+        .unwrap_or("")
 }

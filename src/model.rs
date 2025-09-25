@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +19,20 @@ pub enum SplitOrientation {
     Vertical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ActionId {
+    Copy,
+    Paste,
+    NewWindow,
+    NewTab,
+    SplitHorizontal,
+    SplitVertical,
+    Settings,
+    Close,
+}
+
+pub type KeybindingMap = HashMap<ActionId, Vec<String>>;
+
 #[derive(Clone, Debug)]
 pub enum LayoutNode {
     Terminal(TerminalLeaf),
@@ -29,15 +44,6 @@ impl LayoutNode {
         match self {
             LayoutNode::Terminal(term) => term.id,
             LayoutNode::Split(split) => split.id,
-        }
-    }
-
-    pub fn terminals(&self, out: &mut Vec<TerminalId>) {
-        match self {
-            LayoutNode::Terminal(term) => out.push(term.terminal_id),
-            LayoutNode::Split(split) => {
-                split.children.iter().for_each(|child| child.terminals(out))
-            }
         }
     }
 }
@@ -84,22 +90,38 @@ impl WindowModel {
     pub fn active_tab(&self) -> &TabModel {
         &self.tabs[self.active_tab]
     }
-
-    pub fn active_tab_mut(&mut self) -> &mut TabModel {
-        let index = self.active_tab;
-        &mut self.tabs[index]
-    }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WorkspaceModel {
     pub windows: Vec<WindowModel>,
+    pub keybindings: KeybindingMap,
 }
 
 impl WorkspaceModel {
     pub fn new_single_terminal() -> Self {
-        let node_id = NodeId(Uuid::new_v4());
+        let mut workspace = Self {
+            windows: Vec::new(),
+            keybindings: default_keybindings(),
+        };
+        workspace.add_window();
+        workspace
+    }
+
+    pub fn add_window(&mut self) -> WindowId {
+        let window = Self::new_window_model();
+        let id = window.id;
+        self.windows.push(window);
+        id
+    }
+
+    pub fn remove_window(&mut self, id: WindowId) {
+        self.windows.retain(|w| w.id != id);
+    }
+
+    fn new_window_model() -> WindowModel {
         let terminal_id = TerminalId(Uuid::new_v4());
+        let node_id = NodeId(Uuid::new_v4());
         let tab_id = TabId(Uuid::new_v4());
         let window_id = WindowId(Uuid::new_v4());
 
@@ -117,23 +139,25 @@ impl WorkspaceModel {
             title_flexible: true,
         };
 
-        let window = WindowModel {
+        WindowModel {
             id: window_id,
             title: String::from("Terminator 2"),
             tabs: vec![tab],
             active_tab: 0,
-        };
-
-        Self {
-            windows: vec![window],
         }
     }
+}
 
-    pub fn window_mut(&mut self, id: WindowId) -> Option<&mut WindowModel> {
-        self.windows.iter_mut().find(|w| w.id == id)
-    }
-
-    pub fn window(&self, id: WindowId) -> Option<&WindowModel> {
-        self.windows.iter().find(|w| w.id == id)
-    }
+pub fn default_keybindings() -> KeybindingMap {
+    use ActionId::*;
+    HashMap::from([
+        (Copy, vec!["<Ctrl><Shift>C".into()]),
+        (Paste, vec!["<Ctrl><Shift>V".into()]),
+        (NewWindow, vec!["<Ctrl><Shift>N".into()]),
+        (NewTab, vec!["<Ctrl><Shift>T".into()]),
+        (SplitHorizontal, vec!["<Ctrl><Shift>O".into()]),
+        (SplitVertical, vec!["<Ctrl><Shift>E".into()]),
+        (Settings, vec!["<Ctrl><Shift>S".into()]),
+        (Close, vec!["<Ctrl><Shift>W".into()]),
+    ])
 }

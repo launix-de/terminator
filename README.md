@@ -89,3 +89,8 @@ configuration, DBus control, plugin architecture, and more – is maintained in
 ## Contributing
 Development is in its early stages. Bug reports, ideas, and pull requests are
 welcome; please review the spec and align changes with the planned architecture.
+
+
+## Keyboard Shortcuts
+Terminator 2 binds the traditional Terminator key layout by default (e.g. `<Ctrl><Shift>T>` for a new tab, `<Ctrl><Shift>O/E>` for splits).
+Right-click inside a terminal to see the context menu with the current shortcuts, or open **Settings** to edit them.
