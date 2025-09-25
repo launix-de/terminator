@@ -17,6 +17,7 @@ impl EditableTitleBar {
         let container = Box::new(Orientation::Horizontal, 6);
         container.add_css_class("flat");
         container.add_css_class("titlebar");
+        container.add_css_class("custom-title");
         container.set_margin_top(2);
         container.set_margin_bottom(2);
         container.set_margin_start(6);
@@ -27,9 +28,11 @@ impl EditableTitleBar {
         label.set_halign(Align::Start);
         label.set_xalign(0.0);
         label.set_hexpand(true);
+        label.add_css_class("custom-title-label");
 
         let entry = Entry::new();
         entry.set_hexpand(true);
+        entry.add_css_class("custom-title-entry");
 
         let stack = Stack::new();
         stack.set_transition_type(StackTransitionType::Crossfade);
@@ -84,6 +87,15 @@ impl EditableTitleBar {
 
     pub fn connect_committed<F: Fn(bool, String) + 'static>(&self, callback: F) {
         *self.inner.edit_callback.borrow_mut() = Some(StdBox::new(callback));
+    }
+
+    pub fn set_titles(&self, dynamic: &str, fallback: &str, flexible: bool) {
+        self.inner.flexible.set(flexible);
+        self.inner.is_custom.set(!flexible);
+        self.inner.label.set_text(dynamic);
+        *self.inner.fallback.borrow_mut() = fallback.to_string();
+        *self.inner.last_dynamic.borrow_mut() = dynamic.to_string();
+        self.inner.stack.set_visible_child_name("label");
     }
 }
 
