@@ -246,6 +246,7 @@ fn install_terminal_menu(
         popover.set_has_arrow(false);
         popover.set_parent(&terminal_widget);
         popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.set_size_request(-1, 300);
         popover.popup();
         gesture.set_state(gtk4::EventSequenceState::Claimed);
     });
