@@ -179,7 +179,10 @@ impl WorkspaceModel {
         orientation: SplitOrientation,
     ) -> Option<TerminalId> {
         let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
-        let tab = window.tabs.iter_mut().find(|t| t.contains_terminal(terminal_id))?;
+        let tab = window
+            .tabs
+            .iter_mut()
+            .find(|t| t.contains_terminal(terminal_id))?;
         let new_terminal_id = TerminalId(Uuid::new_v4());
         let replaced = tab.replace_leaf_with_split(terminal_id, orientation, new_terminal_id);
         if replaced {
@@ -190,11 +193,7 @@ impl WorkspaceModel {
         }
     }
 
-    pub fn close_terminal(
-        &mut self,
-        window_id: WindowId,
-        terminal_id: TerminalId,
-    ) -> Option<()> {
+    pub fn close_terminal(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<()> {
         let window_idx = self.windows.iter().position(|w| w.id == window_id)?;
         let window = &mut self.windows[window_idx];
         let tab_idx = window
@@ -464,7 +463,8 @@ impl TabModel {
         orientation: SplitOrientation,
         new_terminal_id: TerminalId,
     ) -> bool {
-        self.root.replace_leaf_with_split(target, orientation, new_terminal_id)
+        self.root
+            .replace_leaf_with_split(target, orientation, new_terminal_id)
     }
 
     fn remove_terminal(&mut self, target: TerminalId) -> bool {
@@ -568,7 +568,9 @@ impl LayoutNode {
             }
             LayoutNode::Tabs(group) => {
                 if let Some(inner) = group.tabs.get_mut(group.active) {
-                    inner.root.replace_leaf_with_split(target, orientation, new_terminal_id)
+                    inner
+                        .root
+                        .replace_leaf_with_split(target, orientation, new_terminal_id)
                 } else {
                     false
                 }
@@ -578,15 +580,24 @@ impl LayoutNode {
 
     fn remove_terminal(&mut self, target: TerminalId) -> bool {
         match self {
-            LayoutNode::Terminal(leaf) => leaf.terminal_id != target, // handled by parent
+            LayoutNode::Terminal(leaf) => {
+                if leaf.terminal_id == target {
+                    *self = LayoutNode::Split(SplitNode {
+                        node_id: NodeId(Uuid::new_v4()),
+                        orientation: SplitOrientation::Vertical,
+                        children: Vec::new(),
+                    });
+                    true
+                } else {
+                    true
+                }
+            }
             LayoutNode::Split(split) => {
-                split.children.retain_mut(|child| {
-                    match child {
-                        LayoutNode::Terminal(leaf) => leaf.terminal_id != target,
-                        _ => {
-                            let kept = child.remove_terminal(target);
-                            kept
-                        }
+                split.children.retain_mut(|child| match child {
+                    LayoutNode::Terminal(leaf) => leaf.terminal_id != target,
+                    _ => {
+                        let kept = child.remove_terminal(target);
+                        kept
                     }
                 });
                 // Collapse if only one child remains
@@ -598,17 +609,13 @@ impl LayoutNode {
                 !self.is_empty()
             }
             LayoutNode::Tabs(group) => {
-                let maybe_idx = group
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, inner)| {
-                        if inner.root.contains_terminal(target) {
-                            Some(idx)
-                        } else {
-                            None
-                        }
-                    });
+                let maybe_idx = group.tabs.iter().enumerate().find_map(|(idx, inner)| {
+                    if inner.root.contains_terminal(target) {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
                 if let Some(idx) = maybe_idx {
                     let inner = &mut group.tabs[idx];
                     let kept = inner.root.remove_terminal(target);
@@ -663,11 +670,11 @@ fn default_keybindings() -> KeybindingMap {
     map.insert(NewWindow, vec!["<Ctrl><Shift>N".into()]);
     map.insert(NewTab, vec!["<Ctrl><Shift>T".into()]);
     map.insert(NewInnerTab, vec!["<Ctrl><Shift>U".into()]);
-    map.insert(SplitHorizontal, vec!["<Ctrl><Shift>H".into()]);
-    map.insert(SplitVertical, vec!["<Ctrl><Alt>V".into()]);
+    map.insert(SplitHorizontal, vec!["<Ctrl><Shift>E".into()]);
+    map.insert(SplitVertical, vec!["<Ctrl><Shift>O".into()]);
     map.insert(Settings, vec!["<Ctrl><Shift>,".into()]);
     map.insert(Close, vec!["<Ctrl><Shift>W".into()]);
-    map.insert(CloseInnerTab, vec!["<Ctrl><Shift>E".into()]);
+    map.insert(CloseInnerTab, vec!["<Ctrl><Shift>D".into()]);
     map
 }
 
@@ -687,7 +694,10 @@ mod tests {
     #[test]
     fn add_inner_tab_creates_group_and_focuses_new() {
         let (mut ws, window_id, tab_id, term_id) = setup_workspace();
-        assert!(matches!(ws.windows[0].tabs[0].root, LayoutNode::Terminal(_)));
+        assert!(matches!(
+            ws.windows[0].tabs[0].root,
+            LayoutNode::Terminal(_)
+        ));
 
         let (_inner_id, new_terminal) = ws
             .add_inner_tab(window_id, tab_id, term_id)
@@ -732,9 +742,7 @@ mod tests {
     #[test]
     fn close_inner_tabs_collapses_group() {
         let (mut ws, window_id, tab_id, term_id) = setup_workspace();
-        let (_id2, new_term) = ws
-            .add_inner_tab(window_id, tab_id, term_id)
-            .expect("added");
+        let (_id2, _new_term) = ws.add_inner_tab(window_id, tab_id, term_id).expect("added");
 
         let inner_ids: Vec<InnerTabId> = match &ws.windows[0].tabs[0].root {
             LayoutNode::Tabs(group) => group.tabs.iter().map(|i| i.id).collect(),
@@ -754,6 +762,39 @@ mod tests {
         assert!(ws.close_inner_tab(window_id, tab_id, inner_ids[0]));
         // Since this was the only tab in the window, the window is removed as well
         assert!(ws.windows.iter().all(|w| w.id != window_id));
+    }
+
+    #[test]
+    fn close_terminal_removes_inner_tab_leaf() {
+        let (mut ws, window_id, tab_id, term_id) = setup_workspace();
+        let (_inner_id, new_term) = ws
+            .add_inner_tab(window_id, tab_id, term_id)
+            .expect("inner tab added");
+
+        ws.close_terminal(window_id, new_term)
+            .expect("closing inner tab terminal succeeds");
+
+        match &ws.windows[0].tabs[0].root {
+            LayoutNode::Tabs(group) => {
+                assert_eq!(group.tabs.len(), 1);
+                assert!(group.tabs[0].root.contains_terminal(term_id));
+            }
+            other => panic!("expected remaining tabs group, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_split_keybindings_match_expected() {
+        let map = default_keybindings();
+        let horiz = map
+            .get(&ActionId::SplitHorizontal)
+            .expect("horizontal binding exists");
+        assert_eq!(horiz, &["<Ctrl><Shift>E".to_string()]);
+
+        let vert = map
+            .get(&ActionId::SplitVertical)
+            .expect("vertical binding exists");
+        assert_eq!(vert, &["<Ctrl><Shift>O".to_string()]);
     }
 }
 

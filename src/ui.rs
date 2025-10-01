@@ -1,6 +1,6 @@
 use gtk4::{
     Align, Box, Entry, EventControllerFocus, EventSequenceState, GestureClick, Orientation, Stack,
-    StackTransitionType, prelude::*,
+    StackTransitionType, gdk, prelude::*,
 };
 use std::{boxed::Box as StdBox, cell::Cell, cell::RefCell, rc::Rc};
 
@@ -116,7 +116,7 @@ struct EditableTitleBarInner {
 impl EditableTitleBarInner {
     fn setup_interactions(self: &Rc<Self>) {
         let gesture = GestureClick::new();
-        gesture.set_button(0);
+        gesture.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
         let this = Rc::clone(self);
         gesture.connect_pressed(move |gesture, n_press, _, _| {
             if n_press == 2 {
@@ -283,7 +283,7 @@ struct EditableTabLabelInner {
 impl EditableTabLabelInner {
     fn setup_interactions(self: &Rc<Self>) {
         let gesture = GestureClick::new();
-        gesture.set_button(0);
+        gesture.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
         let this = Rc::clone(self);
         gesture.connect_pressed(move |gesture, n_press, _, _| {
             if n_press == 2 {

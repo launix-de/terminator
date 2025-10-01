@@ -15,9 +15,12 @@ use gtk4::{
     gio, glib,
     prelude::*,
 };
-use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
+use std::{
+    boxed::Box as StdBox,
+    cell::{Cell, RefCell},
+};
 
 thread_local! {
     static CUSTOM_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = RefCell::new(None);
@@ -182,6 +185,107 @@ impl AppState {
         }
     }
 
+    fn handle_terminal_title_changed(self: &Rc<Self>, terminal_id: TerminalId) {
+        let terminal = match self.registry.try_borrow() {
+            Ok(registry) => registry.terminal(terminal_id),
+            Err(_) => {
+                self.defer_title_update(terminal_id);
+                return;
+            }
+        };
+        let Some(terminal) = terminal else {
+            return;
+        };
+
+        let mut tab_updates: HashSet<(WindowId, TabId)> = HashSet::new();
+        let mut inner_updates: HashSet<(WindowId, InnerTabId)> = HashSet::new();
+        let mut window_updates: HashSet<WindowId> = HashSet::new();
+
+        {
+            let workspace_result = self.workspace.try_borrow_mut();
+            let mut workspace = match workspace_result {
+                Ok(ws) => ws,
+                Err(_) => {
+                    self.defer_title_update(terminal_id);
+                    return;
+                }
+            };
+            for window in workspace.windows.iter_mut() {
+                let window_id = window.id;
+                let active_index = window.active_tab;
+                let active_tab_id = window.tabs.get(active_index).map(|tab| tab.id);
+                let active_terminal = window
+                    .tabs
+                    .get(active_index)
+                    .map(|tab| tab.active_terminal());
+
+                for tab in window.tabs.iter_mut() {
+                    let tab_active_terminal = tab.active_terminal();
+                    if tab.title_flexible && tab_active_terminal == terminal_id {
+                        let fallback = format!("{} — {}", window.title, tab.display_title());
+                        let dynamic = format_terminal_title(&terminal, &fallback, true);
+                        if tab.dynamic_title != dynamic {
+                            tab.dynamic_title = dynamic;
+                        }
+                        tab_updates.insert((window_id, tab.id));
+                        if let (Some(active_id), Some(active_terminal)) =
+                            (active_tab_id, active_terminal)
+                        {
+                            if active_id == tab.id && active_terminal == terminal_id {
+                                window_updates.insert(window_id);
+                            }
+                        }
+                    }
+
+                    if let LayoutNode::Tabs(group) = &mut tab.root {
+                        if let Some(inner) = group
+                            .tabs
+                            .iter_mut()
+                            .find(|inner| inner.focus == terminal_id)
+                        {
+                            if inner.flexible {
+                                let fallback_inner = inner.title.clone();
+                                let dynamic_inner =
+                                    format_terminal_title(&terminal, &fallback_inner, true);
+                                if inner.title != dynamic_inner {
+                                    inner.title = dynamic_inner;
+                                }
+                                inner_updates.insert((window_id, inner.id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let controllers = self.controllers.borrow();
+        for (window_id, tab_id) in tab_updates {
+            if let Some(controller) = controllers.get(&window_id) {
+                controller.update_tab_label_text(tab_id);
+            }
+        }
+        for (window_id, inner_id) in inner_updates {
+            if let Some(controller) = controllers.get(&window_id) {
+                controller.update_inner_tab_label_text(inner_id);
+            }
+        }
+        for window_id in window_updates {
+            if let Some(controller) = controllers.get(&window_id) {
+                controller.update_window_title();
+            }
+        }
+    }
+
+    fn defer_title_update(self: &Rc<Self>, terminal_id: TerminalId) {
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local(move || {
+            if let Some(state) = weak.upgrade() {
+                state.handle_terminal_title_changed(terminal_id);
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
     fn current_tab_id(&self, window_id: WindowId) -> Option<TabId> {
         let ws = self.workspace.borrow();
         ws.windows
@@ -212,19 +316,28 @@ impl AppState {
         });
 
         if let Some(terminal_id) = focused {
-            let new_terminal =
-                self.workspace
-                    .borrow_mut()
-                    .split_terminal(window_id, terminal_id, orientation);
+            let new_terminal = {
+                let mut workspace = self.workspace.borrow_mut();
+                workspace.split_terminal(window_id, terminal_id, orientation)
+            };
             if let Some(new_id) = new_terminal {
                 self.registry.borrow_mut().ensure_terminal(new_id);
                 let tab_id = current_tab.or_else(|| self.current_tab_id(window_id));
+                if let Some(tab_id_value) = tab_id {
+                    {
+                        let mut workspace = self.workspace.borrow_mut();
+                        workspace.set_active_terminal(window_id, tab_id_value, new_id);
+                    }
+                    self.last_focus
+                        .borrow_mut()
+                        .insert(window_id, (tab_id_value, new_id));
+                }
                 self.rebuild_window(window_id);
-                if let Some(tab_id) = tab_id {
+                if let Some(tab_id_value) = tab_id {
                     let weak = Rc::downgrade(self);
                     glib::idle_add_local(move || {
                         if let Some(app_state) = weak.upgrade() {
-                            app_state.focus_and_remember(window_id, tab_id, new_id);
+                            app_state.focus_and_remember(window_id, tab_id_value, new_id);
                         }
                         glib::ControlFlow::Break
                     });
@@ -270,10 +383,10 @@ impl AppState {
                 .map(|window| window.active_tab().active_terminal())
         };
         if let (Some(tab_id), Some(from_terminal)) = (current_tab, focused_terminal) {
-            if let Some((_inner_id, new_terminal)) = self
-                .workspace
-                .borrow_mut()
-                .add_inner_tab(window_id, tab_id, from_terminal)
+            if let Some((_inner_id, new_terminal)) =
+                self.workspace
+                    .borrow_mut()
+                    .add_inner_tab(window_id, tab_id, from_terminal)
             {
                 self.registry.borrow_mut().ensure_terminal(new_terminal);
                 let weak = Rc::downgrade(self);
@@ -293,12 +406,7 @@ impl AppState {
         }
     }
 
-    fn close_inner_tab(
-        self: &Rc<Self>,
-        window_id: WindowId,
-        tab_id: TabId,
-        inner_id: InnerTabId,
-    ) {
+    fn close_inner_tab(self: &Rc<Self>, window_id: WindowId, tab_id: TabId, inner_id: InnerTabId) {
         let changed = self
             .workspace
             .borrow_mut()
@@ -728,7 +836,9 @@ impl WorkspaceController {
                                 .find(|w| w.id == controller.window_id)
                                 .and_then(|window| window.tabs.iter().find(|t| t.id == tab_id))
                                 .and_then(|tab| match &tab.root {
-                                    LayoutNode::Tabs(group) => group.tabs.get(group.active).map(|i| i.id),
+                                    LayoutNode::Tabs(group) => {
+                                        group.tabs.get(group.active).map(|i| i.id)
+                                    }
                                     _ => None,
                                 })
                         } {
@@ -770,10 +880,22 @@ impl WorkspaceController {
         self.window.connect_close_request(move |_| {
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    state
-                        .workspace
-                        .borrow_mut()
-                        .remove_window(controller.window_id);
+                    let ws_result = state.workspace.try_borrow_mut();
+                    let mut workspace = match ws_result {
+                        Ok(ws) => ws,
+                        Err(_) => {
+                            let weak = weak_self.clone();
+                            glib::idle_add_local(move || {
+                                if let Some(ctrl) = weak.upgrade() {
+                                    ctrl.close_window();
+                                }
+                                glib::ControlFlow::Break
+                            });
+                            return glib::Propagation::Proceed;
+                        }
+                    };
+                    workspace.remove_window(controller.window_id);
+                    drop(workspace);
                     state.controllers.borrow_mut().remove(&controller.window_id);
                     state
                         .registry()
@@ -859,12 +981,7 @@ impl WorkspaceController {
             self.refresh_notebook(window_model.clone());
             self.notebook.set_show_tabs(window_model.tabs.len() > 1);
             // Only adjust current page if it differs to avoid spurious signals
-            if self
-                .notebook
-                .current_page()
-                .map(|p| p as usize)
-                != Some(window_model.active_tab)
-            {
+            if self.notebook.current_page().map(|p| p as usize) != Some(window_model.active_tab) {
                 self.notebook
                     .set_current_page(Some(window_model.active_tab as u32));
             }
@@ -872,12 +989,7 @@ impl WorkspaceController {
         } else {
             self.refresh_notebook(window_model.clone());
             self.notebook.set_show_tabs(window_model.tabs.len() > 1);
-            if self
-                .notebook
-                .current_page()
-                .map(|p| p as usize)
-                != Some(window_model.active_tab)
-            {
+            if self.notebook.current_page().map(|p| p as usize) != Some(window_model.active_tab) {
                 self.notebook
                     .set_current_page(Some(window_model.active_tab as u32));
             }
@@ -1020,6 +1132,12 @@ impl WorkspaceController {
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
 
+        let inner_targets: Vec<(InnerTabId, TerminalId)> = group
+            .tabs
+            .iter()
+            .map(|inner| (inner.id, inner.focus))
+            .collect();
+
         for inner in &group.tabs {
             let page = self.build_node(tab_id, &inner.root, false);
             page.set_hexpand(true);
@@ -1071,6 +1189,21 @@ impl WorkspaceController {
 
         notebook.set_show_tabs(group.tabs.len() > 1);
         notebook.set_current_page(Some(group.active as u32));
+
+        if !inner_targets.is_empty() {
+            let weak_self = Rc::downgrade(self);
+            notebook.connect_switch_page(move |_, _, index| {
+                let Some(controller) = weak_self.upgrade() else {
+                    return;
+                };
+                let Some((_, terminal_id)) = inner_targets.get(index as usize) else {
+                    return;
+                };
+                if let Some(state) = controller.state.upgrade() {
+                    state.set_active_terminal(controller.window_id, tab_id, *terminal_id);
+                }
+            });
+        }
 
         notebook.upcast()
     }
@@ -1284,6 +1417,80 @@ impl WorkspaceController {
     fn close_window(&self) {
         self.window.close();
     }
+
+    fn update_tab_label_text(&self, tab_id: TabId) {
+        let Some(label) = self.tab_labels.borrow().get(&tab_id).cloned() else {
+            return;
+        };
+
+        let state = match self.state.upgrade() {
+            Some(state) => state,
+            None => return,
+        };
+
+        let ws = state.workspace.borrow();
+        let Some(window) = ws.windows.iter().find(|w| w.id == self.window_id) else {
+            return;
+        };
+        let Some(tab) = window.tabs.iter().find(|t| t.id == tab_id) else {
+            return;
+        };
+
+        let title = tab.display_title();
+        let flexible = tab.is_title_flexible();
+        label.set_text(&title, flexible);
+        if flexible {
+            label.update_dynamic(Some(&title));
+        }
+    }
+
+    fn update_inner_tab_label_text(&self, inner_id: InnerTabId) {
+        let Some(label) = self.inner_tab_labels.borrow().get(&inner_id).cloned() else {
+            return;
+        };
+
+        let state = match self.state.upgrade() {
+            Some(state) => state,
+            None => return,
+        };
+
+        let ws = state.workspace.borrow();
+        let Some(window) = ws.windows.iter().find(|w| w.id == self.window_id) else {
+            return;
+        };
+
+        for tab in &window.tabs {
+            if let LayoutNode::Tabs(group) = &tab.root {
+                if let Some(inner) = group.tabs.iter().find(|inner| inner.id == inner_id) {
+                    let title = inner.display_title();
+                    let flexible = inner.is_title_flexible();
+                    label.set_text(&title, flexible);
+                    if flexible {
+                        label.update_dynamic(Some(&title));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn update_window_title(&self) {
+        let state = match self.state.upgrade() {
+            Some(state) => state,
+            None => return,
+        };
+
+        let ws = state.workspace.borrow();
+        let Some(window) = ws.windows.iter().find(|w| w.id == self.window_id) else {
+            return;
+        };
+
+        self.window.set_title(Some(&window.title));
+        let active_tab = window.active_tab();
+        let title_text = format!("{} — {}", window.title, active_tab.display_title());
+        self.title_bar
+            .set_titles(&title_text, &window.title, active_tab.is_title_flexible());
+    }
 }
 
 struct TerminalRegistry {
@@ -1367,19 +1574,23 @@ impl TerminalRegistry {
 }
 
 struct TerminalEntry {
+    id: TerminalId,
     terminal: Terminal,
     window_id: Cell<Option<WindowId>>,
     flexible: Cell<bool>,
     labels: RefCell<Vec<glib::WeakRef<Label>>>,
+    owner: Weak<AppState>,
 }
 
 impl TerminalEntry {
     fn new(id: TerminalId, terminal: Terminal, owner: Weak<AppState>) -> Rc<Self> {
         let entry = Rc::new(TerminalEntry {
+            id,
             terminal: terminal.clone(),
             window_id: Cell::new(None),
             flexible: Cell::new(true),
             labels: RefCell::new(Vec::new()),
+            owner: owner.clone(),
         });
 
         let weak_owner = owner.clone();
@@ -1425,6 +1636,10 @@ impl TerminalEntry {
                 false
             }
         });
+
+        if let Some(owner) = self.owner.upgrade() {
+            owner.handle_terminal_title_changed(self.id);
+        }
     }
 }
 
@@ -1653,4 +1868,422 @@ fn format_terminal_title(terminal: &Terminal, fallback: &str, flexible: bool) ->
         }
     }
     display_title.unwrap_or_else(|| fallback.to_string())
+}
+
+#[cfg(test)]
+mod gui_tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    fn pump_events() {
+        let context = glib::MainContext::default();
+        while context.pending() {
+            context.iteration(true);
+        }
+    }
+
+    enum GuiResponse {
+        Ok,
+        Skip(String),
+        Panic(StdBox<dyn std::any::Any + Send + 'static>),
+    }
+
+    enum GuiTask {
+        Run {
+            name: String,
+            test: StdBox<dyn FnOnce(Rc<AppState>, WindowId) + Send + 'static>,
+            response: mpsc::Sender<GuiResponse>,
+        },
+    }
+
+    fn gui_task_sender() -> &'static mpsc::Sender<GuiTask> {
+        static SENDER: OnceLock<mpsc::Sender<GuiTask>> = OnceLock::new();
+        SENDER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<GuiTask>();
+            std::thread::spawn(move || {
+                let _ = glib::setenv("GSETTINGS_BACKEND", "memory", true);
+                let mut gtk_ready = false;
+                let mut css_ready = false;
+                static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+                while let Ok(task) = rx.recv() {
+                    match task {
+                        GuiTask::Run {
+                            name,
+                            test,
+                            response,
+                        } => {
+                            let message = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                if !gtk_ready {
+                                    if gtk4::init().is_err() {
+                                        return Err("GTK init failed (no display)".to_string());
+                                    }
+                                    if gtk4::gdk::Display::default().is_none() {
+                                        return Err("no default display available".to_string());
+                                    }
+                                    gtk_ready = true;
+                                }
+                                if !css_ready {
+                                    ensure_custom_css();
+                                    css_ready = true;
+                                }
+
+                                let id_suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+                                let safe_name: String = name
+                                    .chars()
+                                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                                    .collect();
+                                let app_id = format!(
+                                    "dev.gnome.Terminator2.Test.{}.{}",
+                                    safe_name, id_suffix
+                                );
+                                if !gio::Application::id_is_valid(&app_id) {
+                                    return Err(format!(
+                                        "generated application id is invalid: {app_id}"
+                                    ));
+                                }
+                                let app = Application::new(
+                                    Some(&app_id),
+                                    gio::ApplicationFlags::NON_UNIQUE,
+                                );
+                                if let Err(err) = app.register(None::<&gtk4::gio::Cancellable>) {
+                                    return Err(format!("failed to register application ({err})"));
+                                }
+
+                                let workspace =
+                                    Rc::new(RefCell::new(WorkspaceModel::new_single_terminal()));
+                                let state = Rc::new_cyclic(|weak| AppState {
+                                    app: app.clone(),
+                                    workspace: workspace.clone(),
+                                    registry: RefCell::new(TerminalRegistry::new(weak.clone())),
+                                    controllers: RefCell::new(HashMap::new()),
+                                    last_focus: RefCell::new(HashMap::new()),
+                                    creating_op: Cell::new(false),
+                                });
+
+                                state.install_theme_listener();
+
+                                let window_id = workspace.borrow().windows[0].id;
+                                state.ensure_window(window_id);
+                                pump_events();
+
+                                test(state.clone(), window_id);
+
+                                pump_events();
+
+                                let controllers: Vec<Rc<WorkspaceController>> = {
+                                    let map_ref = state.controllers.borrow();
+                                    map_ref.values().cloned().collect()
+                                };
+                                for controller in controllers {
+                                    controller.close_window();
+                                }
+                                pump_events();
+
+                                app.quit();
+                                Ok(())
+                            }));
+
+                            let response_msg = match message {
+                                Ok(Ok(())) => GuiResponse::Ok,
+                                Ok(Err(reason)) => GuiResponse::Skip(reason),
+                                Err(err) => GuiResponse::Panic(err),
+                            };
+                            let _ = response.send(response_msg);
+                        }
+                    }
+                }
+            });
+            tx
+        })
+    }
+
+    fn run_gui_test<F>(name: &str, test: F)
+    where
+        F: FnOnce(Rc<AppState>, WindowId) + Send + 'static,
+    {
+        let sender = gui_task_sender();
+        let (response_tx, response_rx) = mpsc::channel();
+        let task = GuiTask::Run {
+            name: name.to_string(),
+            test: StdBox::new(test),
+            response: response_tx,
+        };
+        sender.send(task).expect("send gui test task");
+        match response_rx.recv().expect("receive gui test response") {
+            GuiResponse::Ok => {}
+            GuiResponse::Skip(reason) => {
+                eprintln!("skipping GUI test {name}: {reason}");
+            }
+            GuiResponse::Panic(err) => std::panic::resume_unwind(err),
+        }
+    }
+
+    #[test]
+    fn gui_split_focuses_new_terminal() {
+        run_gui_test("split_focus", |state, window_id| {
+            pump_events();
+
+            let (initial_tab, initial_terminal) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                (
+                    window.active_tab().id,
+                    window.active_tab().active_terminal(),
+                )
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+
+            pump_events();
+
+            let (active_tab, active_terminal) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                (
+                    window.active_tab().id,
+                    window.active_tab().active_terminal(),
+                )
+            };
+
+            assert_ne!(
+                active_terminal, initial_terminal,
+                "split must create a new terminal"
+            );
+            assert_eq!(
+                active_tab, initial_tab,
+                "split should stay within the same tab"
+            );
+
+            let remembered = state
+                .last_focus
+                .borrow()
+                .get(&window_id)
+                .copied()
+                .expect("focus tracked");
+            assert_eq!(remembered, (active_tab, active_terminal));
+        });
+    }
+
+    #[test]
+    fn gui_title_change_is_reentrant_safe() {
+        run_gui_test("title_change_reentrant", |state, window_id| {
+            pump_events();
+
+            let terminal_id = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            let workspace_borrow = state.workspace.borrow_mut();
+            state.handle_terminal_title_changed(terminal_id);
+            drop(workspace_borrow);
+
+            pump_events();
+
+            assert!(state.workspace.try_borrow_mut().is_ok());
+        });
+    }
+
+    #[test]
+    fn gui_nested_splits_inner_tabs() {
+        run_gui_test("nested_splits", |state, window_id| {
+            pump_events();
+
+            let _first_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let right_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => {
+                        if split.children.len() == 2 {
+                            match &split.children[1] {
+                                LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                                LayoutNode::Split(right_split) => {
+                                    match &right_split.children[right_split.children.len() - 1] {
+                                        LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                                        _ => panic!("unexpected layout in right split"),
+                                    }
+                                }
+                                LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                            }
+                        } else {
+                            panic!("expected two children after horizontal split");
+                        }
+                    }
+                    _ => panic!("expected split after first horizontal split"),
+                }
+            };
+
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal(window_id, tab_id, right_terminal);
+            }
+            pump_events();
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            let bottom_right_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => {
+                        if let LayoutNode::Split(right_split) = &split.children[1] {
+                            match &right_split.children[right_split.children.len() - 1] {
+                                LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                                LayoutNode::Split(deeper) => {
+                                    match &deeper.children[deeper.children.len() - 1] {
+                                        LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                                        _ => {
+                                            panic!("unexpected layout in nested split")
+                                        }
+                                    }
+                                }
+                                LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                            }
+                        } else {
+                            panic!("expected nested split after vertical split");
+                        }
+                    }
+                    _ => panic!("expected split tree"),
+                }
+            };
+
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal(window_id, tab_id, bottom_right_terminal);
+            }
+            pump_events();
+
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            let tab = window.active_tab();
+            match &tab.root {
+                LayoutNode::Split(split) => {
+                    if let LayoutNode::Split(right_split) = &split.children[1] {
+                        match &right_split.children[right_split.children.len() - 1] {
+                            LayoutNode::Tabs(group) => {
+                                assert_eq!(group.tabs.len(), 2, "expected two inner tabs");
+                            }
+                            _ => panic!("expected inner tabs after creating inner tab"),
+                        }
+                    } else {
+                        panic!("expected nested split for inner tabs");
+                    }
+                }
+                _ => panic!("expected outer split tree"),
+            }
+        });
+    }
+
+    #[test]
+    fn gui_hover_focus_switches_active_terminal() {
+        run_gui_test("hover_focus", |state, window_id| {
+            pump_events();
+
+            let tab_id = state.current_tab_id(window_id).expect("tab id");
+            let original_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            {
+                let last_focus = state.last_focus.borrow();
+                let (_, focused_terminal) = last_focus
+                    .get(&window_id)
+                    .copied()
+                    .expect("last focus after split");
+                assert_ne!(
+                    focused_terminal, original_terminal,
+                    "split should focus the newly created terminal"
+                );
+            }
+
+            {
+                let terminal_widget = state
+                    .registry
+                    .borrow()
+                    .terminal(original_terminal)
+                    .expect("terminal widget");
+                terminal_widget.grab_focus();
+            }
+
+            pump_events();
+
+            let last_focus = state.last_focus.borrow();
+            let (focused_tab, focused_terminal) = last_focus
+                .get(&window_id)
+                .copied()
+                .expect("last focus after hover");
+            assert_eq!(focused_tab, tab_id, "hover should keep same tab");
+            assert_eq!(
+                focused_terminal, original_terminal,
+                "hover should activate hovered terminal"
+            );
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            let active_terminal = window.active_tab().active_terminal();
+            assert_eq!(
+                active_terminal, original_terminal,
+                "workspace active terminal should match hovered terminal"
+            );
+        });
+    }
 }
