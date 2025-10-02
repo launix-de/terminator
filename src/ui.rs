@@ -98,10 +98,12 @@ impl EditableTitleBar {
         self.inner.stack.set_visible_child_name("label");
     }
 
+    #[allow(dead_code)]
     pub fn begin_edit(&self) {
         self.inner.begin_edit();
     }
 
+    #[allow(dead_code)]
     pub fn commit_edit(&self, text: &str) {
         self.inner.finish_edit(Some(text.to_string()));
     }

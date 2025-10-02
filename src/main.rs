@@ -9,9 +9,9 @@ use crate::model::{
 use crate::ui::{EditableTabLabel, EditableTitleBar};
 use glib::signal::{signal_handler_block, signal_handler_unblock};
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, Dialog, Entry, EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, DragSource,
+    Application, ApplicationWindow, Box, Button, Entry, EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, DragSource,
     HeaderBar, Image, Label, ListBox, ListBoxRow, Notebook, Orientation, Paned, PopoverMenu,
-    ResponseType, StyleContext, Widget,
+    ResponseType, Widget,
     gdk::{RGBA, Rectangle},
     gio, glib,
     prelude::*,
@@ -19,7 +19,6 @@ use gtk4::{
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::{
-    boxed::Box as StdBox,
     cell::{Cell, RefCell},
 };
 
@@ -394,6 +393,43 @@ impl AppState {
         }
     }
 
+    // Ctrl+Shift+T: Open a new tab in the closest Tabs group if the focused terminal is inside one,
+    // otherwise open a new top-level tab.
+    fn new_tab_contextual(self: &Rc<Self>, window_id: WindowId) {
+        // Determine current tab and focused terminal
+        let current_tab = self.current_tab_id(window_id);
+        let focused_terminal = {
+            let ws = self.workspace.borrow();
+            ws.windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .map(|window| window.active_tab().active_terminal())
+        };
+        if let (Some(tab_id), Some(term)) = (current_tab, focused_terminal) {
+            // If focused terminal resides inside any Tabs group, create a new inner tab instead
+            let inside_tabs = {
+                let ws = self.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id);
+                if let Some(window) = window {
+                    let tab = window.tabs.iter().find(|t| t.id == tab_id);
+                    if let Some(tab) = tab {
+                        tab.root.find_inner_id_for_terminal(term).is_some()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if inside_tabs {
+                self.new_inner_tab(window_id);
+                return;
+            }
+        }
+        // Fallback: open a new top-level tab
+        self.new_tab(window_id);
+    }
+
     fn close_inner_tab(self: &Rc<Self>, window_id: WindowId, tab_id: TabId, inner_id: InnerTabId) {
         let changed = self
             .workspace
@@ -528,6 +564,25 @@ impl AppState {
         }
     }
 
+    // removed unused set_active_terminal (replaced by no-rebuild focus path)
+
+    fn set_active_terminal_no_rebuild(
+        self: &Rc<Self>,
+        window_id: WindowId,
+        tab_id: TabId,
+        terminal: TerminalId,
+    ) -> bool {
+        let changed = {
+            let mut workspace = self.workspace.borrow_mut();
+            workspace.set_active_terminal(window_id, tab_id, terminal)
+        };
+        if changed {
+            self.focus_and_remember(window_id, tab_id, terminal);
+        }
+        changed
+    }
+
+    #[allow(dead_code)]
     fn set_active_terminal(
         self: &Rc<Self>,
         window_id: WindowId,
@@ -548,22 +603,6 @@ impl AppState {
                 glib::ControlFlow::Break
             });
         }
-    }
-
-    fn set_active_terminal_no_rebuild(
-        self: &Rc<Self>,
-        window_id: WindowId,
-        tab_id: TabId,
-        terminal: TerminalId,
-    ) -> bool {
-        let changed = {
-            let mut workspace = self.workspace.borrow_mut();
-            workspace.set_active_terminal(window_id, tab_id, terminal)
-        };
-        if changed {
-            self.focus_and_remember(window_id, tab_id, terminal);
-        }
-        changed
     }
 
     fn move_focus(self: &Rc<Self>, window_id: WindowId, direction: FocusDirection) {
@@ -627,7 +666,7 @@ impl AppState {
 
     #[allow(deprecated)]
     fn open_settings_dialog(self: &Rc<Self>, parent: &ApplicationWindow) {
-        let dialog = Dialog::builder()
+        let dialog = gtk4::Dialog::builder()
             .title("Keyboard Shortcuts")
             .transient_for(parent)
             .modal(true)
@@ -743,6 +782,7 @@ struct WorkspaceController {
     window_id: WindowId,
     window: ApplicationWindow,
     title_bar: EditableTitleBar,
+    overlay: gtk4::Overlay,
     notebook: Notebook,
     page_tab_ids: RefCell<Vec<TabId>>,
     title_handler: RefCell<Option<(Terminal, glib::SignalHandlerId, glib::SignalHandlerId)>>,
@@ -754,6 +794,9 @@ struct WorkspaceController {
     context_menu_gestures: RefCell<HashMap<TerminalId, GestureClick>>,
     hover_motions: RefCell<HashMap<TerminalId, EventControllerMotion>>,
     last_keyboard_focus: Cell<Option<std::time::Instant>>,
+    preview_label: RefCell<Option<gtk4::Label>>,
+    drop_targets: RefCell<HashMap<TerminalId, gtk4::DropTarget>>,
+    header_drags: RefCell<HashMap<TerminalId, GestureDrag>>,
 }
 
 impl WorkspaceController {
@@ -798,6 +841,32 @@ impl WorkspaceController {
             signal_handler_unblock(&self.notebook, handler_id);
         } else {
             self.notebook.set_current_page(Some(index as u32));
+        }
+    }
+
+    
+
+    #[allow(deprecated)]
+    fn show_preview(&self, text: &str) {
+        // Reuse or create a floating label as a simple preview indicator
+        if let Some(lbl) = self.preview_label.borrow().as_ref() {
+            lbl.set_text(text);
+            lbl.show();
+            return;
+        }
+        let label = gtk4::Label::new(Some(text));
+        label.add_css_class("preview-overlay");
+        label.set_halign(gtk4::Align::Center);
+        label.set_valign(gtk4::Align::Center);
+        self.overlay.add_overlay(&label);
+        label.show();
+        self.preview_label.borrow_mut().replace(label);
+    }
+
+    #[allow(deprecated)]
+    fn hide_preview(&self) {
+        if let Some(lbl) = self.preview_label.borrow().as_ref() {
+            lbl.hide();
         }
     }
 
@@ -907,7 +976,9 @@ impl WorkspaceController {
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
         notebook.set_scrollable(true);
-        container.append(&notebook);
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&notebook));
+        container.append(&overlay);
         window.set_child(Some(&container));
 
         window.present();
@@ -917,6 +988,7 @@ impl WorkspaceController {
             window_id,
             window: window.clone(),
             title_bar: title_bar.clone(),
+            overlay: overlay.clone(),
             notebook: notebook.clone(),
             page_tab_ids: RefCell::new(Vec::new()),
             title_handler: RefCell::new(None),
@@ -928,6 +1000,9 @@ impl WorkspaceController {
             context_menu_gestures: RefCell::new(HashMap::new()),
             hover_motions: RefCell::new(HashMap::new()),
             last_keyboard_focus: Cell::new(None),
+            preview_label: RefCell::new(None),
+            drop_targets: RefCell::new(HashMap::new()),
+            header_drags: RefCell::new(HashMap::new()),
         });
 
         controller.install_actions();
@@ -974,7 +1049,7 @@ impl WorkspaceController {
         new_tab.connect_activate(move |_, _| {
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    state.new_tab(controller.window_id);
+                    state.new_tab_contextual(controller.window_id);
                 }
             }
         });
@@ -1349,7 +1424,28 @@ impl WorkspaceController {
             header.append(&label);
             label_ref = Some(label);
 
-            Self::claim_primary_drag(&header);
+            // Claim drags so Paned doesn't resize when starting a drag here
+            let header_drag = GestureDrag::new();
+            header_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            header_drag.connect_drag_begin(|g, _, _| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+            });
+            header.add_controller(header_drag.clone());
+            // Keep for tests
+            if let Some(controller) = self.state.upgrade().and_then(|_| Some(self.clone())) {
+                controller
+                    .header_drags
+                    .borrow_mut()
+                    .insert(leaf.terminal_id, header_drag);
+            }
+            // Also claim primary press at capture phase to prevent Paned from initiating resize
+            let cap_click = GestureClick::new();
+            cap_click.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+            cap_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            cap_click.connect_pressed(|g, _, _, _| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+            });
+            header.add_controller(cap_click);
 
             // Add a minimal drag source so grabbing the header initiates a drag operation
             let payload = format!(
@@ -1423,6 +1519,101 @@ impl WorkspaceController {
 
         self.install_terminal_menu(&terminal, tab_id, leaf.terminal_id);
 
+        // Install DropTarget on the wrapper to accept drags for splitting
+        let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+        let weak_self = Rc::downgrade(self);
+        let target_terminal = leaf.terminal_id;
+        drop.connect_motion(move |dt, x, y| {
+            // Show a coarse preview for target half
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(widget) = dt.widget() {
+                    #[allow(deprecated)]
+                    let alloc = widget.allocation();
+                    let w = alloc.width().max(1) as f64;
+                    let h = alloc.height().max(1) as f64;
+                    let dx = ((x / w) - 0.5).abs();
+                    let dy = ((y / h) - 0.5).abs();
+                    // If horizontal distance dominates → left/right; else top/bottom
+                    let text = if dx > dy {
+                        if x < w / 2.0 { "Split Left" } else { "Split Right" }
+                    } else {
+                        if y < h / 2.0 { "Split Top" } else { "Split Bottom" }
+                    };
+                    controller.show_preview(text);
+                }
+            }
+            gtk4::gdk::DragAction::MOVE
+        });
+        let weak_self = Rc::downgrade(self);
+        drop.connect_leave(move |_| {
+            if let Some(controller) = weak_self.upgrade() {
+                controller.hide_preview();
+            }
+        });
+        let weak_self = Rc::downgrade(self);
+        drop.connect_drop(move |dt, value, x, y| {
+            let payload = value.get::<String>().ok().unwrap_or_default();
+            // Expect payload like: "term-move window=... tab=... terminal=... src=..."
+            let mut moving_id: Option<TerminalId> = None;
+            for part in payload.split_whitespace() {
+                if let Some((k, v)) = part.split_once('=') {
+                    match k {
+                        "terminal" => {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
+                                moving_id = Some(TerminalId(uuid));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let moving = match moving_id { Some(m) => m, None => return false };
+            if moving == target_terminal {
+                return false;
+            }
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    // Decide orientation based on drop position (left/right -> horizontal, top/bottom -> vertical)
+                    let mut orientation = SplitOrientation::Vertical;
+                    if let Some(widget) = dt.widget() {
+                        #[allow(deprecated)]
+                        let alloc = widget.allocation();
+                        let w = alloc.width().max(1) as f64;
+                        let h = alloc.height().max(1) as f64;
+                        let dx = ((x / w) - 0.5).abs();
+                        let dy = ((y / h) - 0.5).abs();
+                        orientation = if dx > dy {
+                            SplitOrientation::Horizontal
+                        } else {
+                            SplitOrientation::Vertical
+                        };
+                    }
+                    let ok = state
+                        .workspace
+                        .borrow_mut()
+                        .move_terminal_to_split(controller.window_id, moving, target_terminal, orientation);
+                    if ok {
+                        state.rebuild_window(controller.window_id);
+                        controller.hide_preview();
+                        // Focus moved terminal
+                        if let Some(tab_id) = state.current_tab_id(controller.window_id) {
+                            state.focus_and_remember(controller.window_id, tab_id, moving);
+                        }
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        wrapper.add_controller(drop.clone());
+        // Expose drop target for tests
+        if let Some(controller) = self.state.upgrade().and_then(|_| Some(self.clone())) {
+            controller
+                .drop_targets
+                .borrow_mut()
+                .insert(leaf.terminal_id, drop);
+        }
+
         wrapper
     }
 
@@ -1467,6 +1658,7 @@ impl WorkspaceController {
             close_btn.set_child(Some(&img));
             label_box.append(&close_btn);
 
+            // Claim drag-begin on inner tab labels so Paned doesn't resize when starting a drag
             Self::claim_primary_drag(&label_box);
 
             // Enable drag from inner tab label to avoid interacting with Paned handles
@@ -1475,6 +1667,54 @@ impl WorkspaceController {
                 self.window_id.0, tab_id.0, inner.id.0, inner.focus.0
             );
             Self::attach_drag_source(&label_box, payload);
+
+            // Drop onto inner tab label box: move existing terminal into a new inner tab
+            let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            let target_inner = inner.id;
+            let weak_self = Rc::downgrade(self);
+            drop.connect_drop(move |_dt, value, _x, _y| {
+                let payload = value.get::<String>().ok().unwrap_or_default();
+                let mut moving_id: Option<TerminalId> = None;
+                let mut src_window: Option<WindowId> = None;
+                for part in payload.split_whitespace() {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k {
+                            "terminal" => {
+                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
+                                    moving_id = Some(TerminalId(uuid));
+                                }
+                            }
+                            "window" => {
+                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
+                                    src_window = Some(WindowId(uuid));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let (moving, src_window) = match (moving_id, src_window) {
+                    (Some(m), Some(w)) => (m, w),
+                    _ => return false,
+                };
+                if let Some(controller) = weak_self.upgrade() {
+                    if let Some(state) = controller.state.upgrade() {
+                        if let Some(tab_id) = state.current_tab_id(controller.window_id) {
+                            let ok = state
+                                .workspace
+                                .borrow_mut()
+                                .move_terminal_to_new_inner_tab(src_window, tab_id, target_inner, moving);
+                            if ok {
+                                state.rebuild_window(controller.window_id);
+                                state.focus_and_remember(controller.window_id, tab_id, moving);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            });
+            label_box.add_controller(drop);
 
             let weak_self = Rc::downgrade(self);
             let inner_id = inner.id;
@@ -1562,6 +1802,7 @@ impl WorkspaceController {
             close_btn.set_child(Some(&img));
             label_box.append(&close_btn);
 
+            // Claim drag-begin on top-level labels; this does not claim clicks and won't affect switching
             Self::claim_primary_drag(&label_box);
 
             // Enable drag from top-level tab labels as well
@@ -1572,6 +1813,51 @@ impl WorkspaceController {
                 tab.active_terminal().0
             );
             Self::attach_drag_source(&label_box, payload);
+
+            // Drop on top-level tab label: move existing terminal into a new top-level tab
+            let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            let weak_self = Rc::downgrade(self);
+            drop.connect_drop(move |_dt, value, _x, _y| {
+                let payload = value.get::<String>().ok().unwrap_or_default();
+                let mut moving_id: Option<TerminalId> = None;
+                let mut src_window: Option<WindowId> = None;
+                for part in payload.split_whitespace() {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k {
+                            "terminal" => {
+                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
+                                    moving_id = Some(TerminalId(uuid));
+                                }
+                            }
+                            "window" => {
+                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
+                                    src_window = Some(WindowId(uuid));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let (moving, src_window) = match (moving_id, src_window) {
+                    (Some(m), Some(w)) => (m, w),
+                    _ => return false,
+                };
+                if let Some(controller) = weak_self.upgrade() {
+                    if let Some(state) = controller.state.upgrade() {
+                        if let Some(new_tab) = state
+                            .workspace
+                            .borrow_mut()
+                            .move_terminal_to_new_tab(src_window, moving)
+                        {
+                            state.rebuild_window(controller.window_id);
+                            state.focus_and_remember(controller.window_id, new_tab, moving);
+                            return true;
+                        }
+                    }
+                }
+                false
+            });
+            label_box.add_controller(drop);
             close_btn.set_focus_on_click(false);
             close_btn.set_can_focus(false);
             // Capture gesture to prevent tab switching before close
@@ -1611,6 +1897,8 @@ impl WorkspaceController {
         }
 
         *self.page_tab_ids.borrow_mut() = new_page_ids;
+
+        // Top-level notebook drops are not yet enabled to avoid interfering with tab switching.
     }
 
     fn current_tab_id(&self) -> Option<TabId> {
@@ -2124,7 +2412,8 @@ fn mix_colors(a: &RGBA, b: &RGBA, factor: f32) -> RGBA {
 }
 
 #[allow(deprecated)]
-fn colors_from_context(context: &StyleContext) -> Option<(RGBA, RGBA)> {
+#[allow(deprecated)]
+fn colors_from_context(context: &gtk4::StyleContext) -> Option<(RGBA, RGBA)> {
     let fg = context
         .lookup_color("theme_fg_color")
         .or_else(|| context.lookup_color("window_fg_color"))
@@ -2310,8 +2599,10 @@ fn format_terminal_title(terminal: &Terminal, fallback: &str, flexible: bool) ->
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod gui_tests {
     use super::*;
+    use std::boxed::Box as StdBox;
     use gtk4::prelude::{GtkWindowExt, WidgetExt};
     use gtk4::{Notebook, Orientation, Paned, Widget};
     use std::convert::TryInto;
@@ -4276,51 +4567,355 @@ mod gui_tests {
     }
 
     #[test]
-    fn gui_drag_sources_present_but_no_drop_targets() {
-        // This test documents current DnD status: drags can start from titles, but there are no drop targets yet.
-        run_gui_test("dnd_sources_no_targets", |state, window_id| {
-            use ::gio::prelude::ListModelExt;
+    fn gui_alt_up_from_inner_tabs_moves_to_adjacent_vertical_terminal() {
+        run_gui_test("alt_up_from_inner_tabs", |state, window_id| {
+            pump_events();
+
+            // Start with a single terminal (top-left)
+            let (tab_id, _first) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                (window.active_tab().id, window.active_tab().active_terminal())
+            };
+
+            // Split horizontally -> create right terminal
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            // Active is on the right terminal
+            let _right = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            // Split vertically on the right -> nested vertical: top-right and bottom-right
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            // Capture bottom-right (current) and compute top-right via focus_neighbor(Up)
+            let (bottom_right, top_right) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                let bottom = window.active_tab().active_terminal();
+                let up = ws
+                    .focus_neighbor(window_id, window.active_tab().id, bottom, FocusDirection::Up)
+                    .expect("top-right neighbor exists");
+                (bottom, up)
+            };
+
+            // Create inner tabs at bottom-right by adding a new inner tab from bottom-right
+            {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                assert_eq!(window.active_tab().active_terminal(), bottom_right);
+            }
+
+            let (_inner_id, new_term) = state
+                .workspace
+                .borrow_mut()
+                .add_inner_tab(window_id, tab_id, bottom_right)
+                .expect("failed to create inner tab at bottom-right");
+            state.registry.borrow_mut().ensure_terminal(new_term);
+            state.rebuild_window(window_id);
+            pump_events();
+            state.set_active_terminal_no_rebuild(window_id, tab_id, new_term);
+
+            // Now Alt+Up should move focus to the adjacent vertical neighbor (top-right),
+            // not to the far-away top-left terminal.
+            state.move_focus(window_id, FocusDirection::Up);
+            pump_events();
+
+            let current = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+            assert_eq!(
+                current, top_right,
+                "Alt+Up should focus the adjacent top-right terminal from inner tabs"
+            );
+        });
+    }
+
+    #[test]
+    fn gui_dnd_from_header_to_right_half_splits_horizontally() {
+        // Spec: When dragging a terminal header and dropping on the right half of another
+        // terminal, the target becomes an hsplit with the moved terminal on the right.
+        // This mirrors the screenshot/use-case: grab the header in the lower vsplit and drop
+        // on the right half of the other terminal.
+        run_gui_test("dnd_header_to_right_half", |state, window_id| {
+            pump_events();
+
+            // Start from a single terminal. Record its id as TOP.
+            let (tab_id, top) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                (window.active_tab().id, window.active_tab().active_terminal())
+            };
+
+            // Create a bottom terminal via vertical split; it becomes active (moving candidate).
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+            let bottom = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            // Find the drop target for the TOP terminal and emit a synthetic drop on its right half.
+            let controller = controller_for(&state, window_id);
+            let drop = {
+                let map = controller.drop_targets.borrow();
+                map.get(&top).cloned().expect("drop target for top terminal")
+            };
+            // Compute right-half coordinates from the associated widget allocation
+            let widget = drop.widget().expect("drop target widget");
+            wait_for_widget(&widget);
+            let alloc = widget.allocation();
+            let x = (alloc.width() as f64 * 0.75).max(1.0);
+            let y = (alloc.height() as f64 * 0.5).max(1.0);
+
+            // Build the payload string like the DragSource does
+            let payload = format!(
+                "term-move window={} tab={} terminal={} src=header",
+                controller.window_id.0, tab_id.0, bottom.0
+            );
+
+            // Emit the drop; expect true (handled)
+            let handled = drop.emit_by_name::<bool>("drop", &[&payload, &x, &y]);
+            assert!(handled, "drop should be handled and perform a split");
+            pump_events();
+
+            // Verify: root is a vertical split whose top child is an hsplit (Horizontal)
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            let tab = window.tabs.iter().find(|t| t.id == tab_id).unwrap();
+            match &tab.root {
+                LayoutNode::Split(outer) => {
+                    assert_eq!(outer.orientation, SplitOrientation::Vertical);
+                    match &outer.children[0] {
+                        LayoutNode::Split(inner) => {
+                            assert_eq!(inner.orientation, SplitOrientation::Horizontal);
+                            // Moved terminal should be present somewhere in the right branch.
+                            let right_branch = inner.children.last().unwrap();
+                            assert!(right_branch.contains_terminal(bottom), "moved terminal should be on the right");
+                        }
+                        other => panic!("expected hsplit at top, got {:?}", other),
+                    }
+                }
+                other => panic!("expected outer vsplit, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn gui_header_drag_begin_does_not_move_paned() {
+        // Ensure that starting a drag on the header does not resize the Paned.
+        run_gui_test("header_drag_no_resize", |state, window_id| {
+            pump_events();
+
+            // Create a horizontal split to have a Paned
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let paned = page.downcast::<Paned>().expect("paned");
+            let alloc_before = paned.allocation();
+
+            // Emit drag-begin on the header of the active terminal
+            let active_term = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+            let header_drag = {
+                let map = controller.header_drags.borrow();
+                map.get(&active_term).cloned().expect("header drag controller")
+            };
+            header_drag.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
+            pump_events();
+
+            let alloc_after = paned.allocation();
+            assert_eq!(alloc_before.width(), alloc_after.width());
+            assert_eq!(alloc_before.height(), alloc_after.height());
+        });
+    }
+
+    #[test]
+    fn gui_three_horizontal_splits_resizing_left_keeps_right_ratio() {
+        // Create three columns (Horizontal splits). Moving the first divider should not
+        // change the ratio between the middle and right columns.
+        run_gui_test("three_hsplits_ratio_stable", |state, window_id| {
+            pump_events();
+
+            // First horizontal split -> two columns
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            // Second horizontal split on the right column -> three columns
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            assert_eq!(top.orientation(), Orientation::Horizontal);
+            let (_, right_widget) = paned_children(&top);
+            let nested = right_widget.downcast::<Paned>().expect("nested paned");
+            assert_eq!(nested.orientation(), Orientation::Horizontal);
+
+            // Capture ratio of the nested (middle vs right) before resize
+            let alloc_nested_before = nested.allocation();
+            #[allow(deprecated)]
+            let pos_before = nested.position();
+            let ratio_before = pos_before as f64 / alloc_nested_before.width().max(1) as f64;
+
+            // Move the first divider (top paned) to the right by 20% of its width
+            #[allow(deprecated)]
+            let top_width = top.allocation().width().max(1);
+            let new_pos = ((top_width as f64) * 0.7) as i32; // 70% to the right
+            nested.set_position(nested.position()); // ensure nested stable
+            top.set_position(new_pos);
+            pump_events();
+
+            // The nested ratio should remain approximately the same
+            let alloc_nested_after = nested.allocation();
+            #[allow(deprecated)]
+            let pos_after = nested.position();
+            let ratio_after = pos_after as f64 / alloc_nested_after.width().max(1) as f64;
+            let delta = (ratio_after - ratio_before).abs();
+            assert!(delta < 0.05, "nested ratio changed too much: before={}, after={}", ratio_before, ratio_after);
+        });
+    }
+
+    #[test]
+    fn gui_drag_sources_present() {
+        // This test documents current DnD status: drags can start from titles (sources present).
+        // Drops are not yet handled by the application.
+        run_gui_test("dnd_sources_present", |state, window_id| {
 
             pump_events();
 
-            fn count_dnd(widget: &Widget) -> (usize, usize) {
-                // Returns (drag_sources, drop_targets)
+            fn count_drag_sources(widget: &Widget) -> usize {
                 let mut ds = 0usize;
-                let mut dt = 0usize;
-
                 let model = widget.observe_controllers();
                 for i in 0..model.n_items() {
                     if let Some(obj) = model.item(i) {
-                        // Count DragSource
                         if obj.clone().downcast::<DragSource>().is_ok() {
                             ds += 1;
                         }
-                        // Count DropTarget
-                        if obj.clone().downcast::<gtk4::DropTarget>().is_ok() {
-                            dt += 1;
-                        }
                     }
                 }
-
-                // Recurse into children
                 let mut child = widget.first_child();
                 while let Some(c) = child.clone() {
-                    let (a, b) = count_dnd(&c);
-                    ds += a;
-                    dt += b;
+                    ds += count_drag_sources(&c);
                     child = c.next_sibling();
                 }
-                (ds, dt)
+                ds
             }
 
             let controller = controller_for(&state, window_id);
             let root = controller.window.clone().upcast::<Widget>();
-            let (sources, targets) = count_dnd(&root);
+            let sources = count_drag_sources(&root);
             assert!(sources > 0, "expected at least one DragSource on labels/headers");
-            assert_eq!(
-                targets, 0,
-                "no DropTargets are installed yet; DnD drops are not wired"
-            );
+        });
+    }
+
+    #[test]
+    fn gui_ctrl_shift_t_prefers_closest_inner_tabs() {
+        // Build a layout with inner tabs and ensure contextual new-tab adds to inner group
+        run_gui_test("new_tab_contextual_inner", |state, window_id| {
+            pump_events();
+
+            // Create an inner tabs group at the active terminal
+            let (tab_id, from_terminal) = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                (window.active_tab().id, window.active_tab().active_terminal())
+            };
+            {
+                let (_inner, new_term) = state
+                    .workspace
+                    .borrow_mut()
+                    .add_inner_tab(window_id, tab_id, from_terminal)
+                    .expect("inner tab added");
+                state.registry.borrow_mut().ensure_terminal(new_term);
+            }
+            state.rebuild_window(window_id);
+            pump_events();
+
+            // Record top-level tab count before
+            let (tabs_before, inner_before) = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let inner_count = match &window.active_tab().root {
+                    LayoutNode::Tabs(group) => group.tabs.len(),
+                    LayoutNode::Split(_) | LayoutNode::Terminal(_) => 0,
+                };
+                (window.tabs.len(), inner_count)
+            };
+
+            // Invoke contextual new tab (equivalent to Ctrl+Shift+T)
+            state.new_tab_contextual(window_id);
+            pump_events();
+
+            let (tabs_after, inner_after) = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let inner_count = match &window.active_tab().root {
+                    LayoutNode::Tabs(group) => group.tabs.len(),
+                    LayoutNode::Split(_) | LayoutNode::Terminal(_) => 0,
+                };
+                (window.tabs.len(), inner_count)
+            };
+
+            // Assert we added to inner tabs, not top-level
+            assert_eq!(tabs_after, tabs_before, "top-level tab count should not change");
+            assert!(inner_after == inner_before + 1 || (inner_before == 0 && inner_after >= 2), "inner tab count should increase");
         });
     }
 
