@@ -900,12 +900,7 @@ impl WorkspaceController {
                                 .iter()
                                 .find(|w| w.id == controller.window_id)
                                 .and_then(|window| window.tabs.iter().find(|t| t.id == tab_id))
-                                .and_then(|tab| match &tab.root {
-                                    LayoutNode::Tabs(group) => {
-                                        group.tabs.get(group.active).map(|i| i.id)
-                                    }
-                                    _ => None,
-                                })
+                                .and_then(|tab| tab.active_inner_id())
                         } {
                             state.close_inner_tab(controller.window_id, tab_id, inner_id);
                         }
@@ -1259,6 +1254,10 @@ impl WorkspaceController {
             let hover_terminal = leaf.terminal_id;
             motion.connect_enter(move |_, _x, _y| {
                 if let Some(controller) = weak_self.upgrade() {
+                    // If we just changed focus programmatically (keyboard), don't let hover override
+                    if controller.suppress_focus.replace(false) {
+                        return;
+                    }
                     if let Some(state) = controller.state.upgrade() {
                         state.set_active_terminal(controller.window_id, hover_tab, hover_terminal);
                     }
@@ -2267,6 +2266,61 @@ mod gui_tests {
         );
     }
 
+    fn assert_paned_min_child_percent(paned: &Paned, min_percent: f64) {
+        assert!(
+            min_percent > 0.0 && min_percent <= 1.0,
+            "percent must be between (0, 1]"
+        );
+        let alloc = paned.allocation();
+        let min = ((alloc.height() as f64) * min_percent).floor() as i32;
+        assert_paned_min_child_sizes(paned, min);
+    }
+
+    fn assert_paned_min_child_percent_width(paned: &Paned, min_percent: f64) {
+        assert!(
+            min_percent > 0.0 && min_percent <= 1.0,
+            "percent must be between (0, 1]"
+        );
+        let (left, right) = paned_children(paned);
+        assert_widget_ready(&left);
+        assert_widget_ready(&right);
+        let alloc = paned.allocation();
+        let la = left.allocation();
+        let ra = right.allocation();
+        let min = ((alloc.width() as f64) * min_percent).floor() as i32;
+        assert!(la.width() >= min, "left child width too small");
+        assert!(ra.width() >= min, "right child width too small");
+    }
+
+    fn assert_focus_matches_model(state: &Rc<AppState>, window_id: WindowId) {
+        let (tab_id, terminal_id) = {
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            (window.active_tab().id, window.active_tab().active_terminal())
+        };
+        let controller = controller_for(state, window_id);
+        let page = active_page_widget(&controller);
+        assert_widget_ready(&page);
+        let term = state
+            .registry
+            .borrow()
+            .terminal(terminal_id)
+            .expect("active terminal widget present");
+        assert!(term.has_focus(), "active terminal widget should have focus");
+        // Ensure remembered focus matches
+        let last = state
+            .last_focus
+            .borrow()
+            .get(&window_id)
+            .copied()
+            .expect("last focus recorded");
+        assert_eq!(last, (tab_id, terminal_id));
+    }
+
     fn assert_stable_tab_count(
         state: &Rc<AppState>,
         window_id: WindowId,
@@ -2332,9 +2386,20 @@ mod gui_tests {
                                     .chars()
                                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
                                     .collect();
+                                // Build a valid GApplication ID (reverse-DNS). Allowed: [a-z0-9-] segments.
+                                let safe_name: String = name
+                                    .to_ascii_lowercase()
+                                    .chars()
+                                    .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c } else { '-' })
+                                    .collect();
+                                let segment = if safe_name.chars().next().map(|ch| ch.is_ascii_digit()).unwrap_or(true) {
+                                    format!("t{}", safe_name)
+                                } else {
+                                    safe_name
+                                };
                                 let app_id = format!(
-                                    "dev.gnome.Terminator2.Test.{}.{}",
-                                    safe_name, id_suffix
+                                    "dev.gnome.terminator2.test.{}.{}",
+                                    segment, id_suffix
                                 );
                                 if !gio::Application::id_is_valid(&app_id) {
                                     return Err(format!(
@@ -2418,7 +2483,12 @@ mod gui_tests {
         match response_rx.recv().expect("receive gui test response") {
             GuiResponse::Ok => {}
             GuiResponse::Skip(reason) => {
-                eprintln!("skipping GUI test {name}: {reason}");
+                // If GUI is required (e.g., in CI or when reproducing bugs), fail instead of skip
+                if std::env::var("REQUIRE_GUI").is_ok() {
+                    panic!("GUI test {name} skipped but GUI is required: {reason}");
+                } else {
+                    eprintln!("skipping GUI test {name}: {reason}");
+                }
             }
             GuiResponse::Panic(err) => std::panic::resume_unwind(err),
         }
@@ -2703,6 +2773,336 @@ mod gui_tests {
             // Ensure top-level notebook page count didn't change spuriously
             let controller = controller_for(&state, window_id);
             assert_eq!(controller.notebook.n_pages(), 1);
+
+            // Verify tree shape contains a Tabs node
+            let page = active_page_widget(&controller);
+            let tree = build_view_tree(&page);
+            let shape = view_to_string(&tree);
+            assert!(
+                shape.contains("Notebook") || shape.contains("Tabs"),
+                "expected tabs in shape: {}",
+                shape
+            );
+
+            // Focus must match model
+            assert_focus_matches_model(&state, window_id);
+        });
+    }
+
+    #[test]
+    fn gui_keyboard_focus_overrides_hover_without_mouse_move() {
+        run_gui_test("keyboard_overrides_hover", |state, window_id| {
+            pump_events();
+
+            // Create two terminals side-by-side
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            // Determine left and right terminal IDs
+            let (left, right) = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => {
+                        let left_id = match &split.children[0] {
+                            LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                            LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                            LayoutNode::Split(_) => panic!("unexpected nested left split"),
+                        };
+                        let right_id = match &split.children[1] {
+                            LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                            LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                            LayoutNode::Split(_) => panic!("unexpected nested right split"),
+                        };
+                        (left_id, right_id)
+                    }
+                    _ => panic!("expected split root"),
+                }
+            };
+
+            // Simulate hover over the left terminal to set focus via hover
+            {
+                let controller = controller_for(&state, window_id);
+                let motion = {
+                    let map = controller.hover_motions.borrow();
+                    map.get(&left).cloned().expect("left motion controller")
+                };
+                motion.emit_by_name::<()>("enter", &[&0.0f64, &0.0f64]);
+            }
+            pump_events();
+
+            // Move focus to the right via keyboard (Alt+Right equivalent)
+            state.move_focus(window_id, FocusDirection::Right);
+            pump_events();
+
+            // Without moving mouse, simulate a spurious hover-enter on left again.
+            // Because we just moved focus programmatically, hover should NOT override.
+            {
+                let controller = controller_for(&state, window_id);
+                let motion = {
+                    let map = controller.hover_motions.borrow();
+                    map.get(&left).cloned().expect("left motion controller")
+                };
+                motion.emit_by_name::<()>("enter", &[&0.0f64, &0.0f64]);
+            }
+            pump_events();
+
+            // Expect focus to remain on the right terminal
+            let ws = state.workspace.borrow();
+            let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+            assert_eq!(window.active_tab().active_terminal(), right);
+        });
+    }
+
+    #[test]
+    fn gui_click_inner_tab_header_switches_tabs() {
+        run_gui_test("click_inner_tab_header", |state, window_id| {
+            pump_events();
+
+            // Build: split horizontally, then split the right vertically, then add an inner tab
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let right_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => match &split.children[1] {
+                        LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                        LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                        LayoutNode::Split(_) => panic!("unexpected nested right split before vertical"),
+                    },
+                    _ => panic!("expected split root"),
+                }
+            };
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal_no_rebuild(window_id, tab_id, right_terminal);
+            }
+            pump_events();
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            // Locate the inner notebook at bottom-right and determine expected first tab focus
+            let expected_first_focus = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(outer) => match &outer.children[1] {
+                        LayoutNode::Split(nested) => match nested.children.last().unwrap() {
+                            LayoutNode::Tabs(group) => group.tabs.first().unwrap().focus,
+                            other => panic!("expected tabs at bottom-right, got {:?}", other),
+                        },
+                        other => panic!("expected nested split at right, got {:?}", other),
+                    },
+                    other => panic!("expected split root, got {:?}", other),
+                }
+            };
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            let (_, right_widget) = paned_children(&top);
+            let nested = right_widget.downcast::<Paned>().expect("nested paned");
+            let (_, right_end) = paned_children(&nested);
+            let inner_notebook = right_end.downcast::<Notebook>().expect("inner notebook");
+
+            // Simulate clicking first tab header by setting current page via API
+            inner_notebook.set_current_page(Some(0));
+            pump_events();
+
+            // Assert: notebook switched and workspace active terminal matches first inner tab focus
+            assert_eq!(inner_notebook.current_page().unwrap_or(999), 0);
+            let ws = state.workspace.borrow();
+            let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+            assert_eq!(window.active_tab().active_terminal(), expected_first_focus);
+            drop(ws);
+            // Associated widget should have focus too
+            let term = state
+                .registry
+                .borrow()
+                .terminal(expected_first_focus)
+                .expect("terminal widget present");
+            assert!(term.has_focus(), "clicked inner tab should have widget focus");
+        });
+    }
+
+    #[test]
+    fn gui_inner_tab_label_edit_and_persist() {
+        run_gui_test("inner_tab_label_edit", |state, window_id| {
+            pump_events();
+
+            // Build nested inner tabs at bottom-right: E (H split), O (V split on right), U (new inner)
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+            let right_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => match &split.children[1] {
+                        LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                        LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                        LayoutNode::Split(_) => panic!("unexpected nested right split before vertical"),
+                    },
+                    _ => panic!("expected split root"),
+                }
+            };
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal_no_rebuild(window_id, tab_id, right_terminal);
+            }
+            pump_events();
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            // Identify the first inner tab (original) and its label
+            let (first_inner_id, first_focus_id) = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(outer) => match &outer.children[1] {
+                        LayoutNode::Split(nested) => match nested.children.last().unwrap() {
+                            LayoutNode::Tabs(group) => {
+                                let inner = group.tabs.first().unwrap();
+                                (inner.id, inner.focus)
+                            }
+                            other => panic!("expected tabs at bottom-right, got {:?}", other),
+                        },
+                        other => panic!("expected nested right split, got {:?}", other),
+                    },
+                    other => panic!("expected split root, got {:?}", other),
+                }
+            };
+
+            // Grab controller and the label widget for the first inner tab
+            let controller = controller_for(&state, window_id);
+            let editable = {
+                let map = controller.inner_tab_labels.borrow();
+                map.get(&first_inner_id)
+                    .cloned()
+                    .expect("editable inner tab label")
+            };
+            let container = editable.widget();
+
+            // Descend into container -> Stack -> Entry and Label
+            let stack = container
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Stack>().ok())
+                .expect("stack child");
+
+            // Show entry editor and set new title
+            stack.set_visible_child_name("entry");
+            let mut child = stack.first_child().expect("stack has children");
+            let mut entry_opt = None;
+            let mut label_opt = None;
+            loop {
+                if entry_opt.is_none() {
+                    if let Ok(e) = child.clone().downcast::<gtk4::Entry>() {
+                        entry_opt = Some(e);
+                    }
+                }
+                if label_opt.is_none() {
+                    if let Ok(l) = child.clone().downcast::<gtk4::Label>() {
+                        label_opt = Some(l);
+                    }
+                }
+                if entry_opt.is_some() && label_opt.is_some() {
+                    break;
+                }
+                if let Some(next) = child.next_sibling() {
+                    child = next;
+                } else {
+                    break;
+                }
+            }
+            let entry = entry_opt.expect("entry widget");
+            let label_widget = label_opt.expect("label widget");
+
+            let new_title = "My Custom Inner";
+            entry.set_text(new_title);
+            entry.emit_by_name::<()>("activate", &[]);
+            pump_events();
+
+            // UI label text should update immediately
+            assert_eq!(label_widget.text().to_string(), new_title);
+
+            // Workspace model should reflect custom, non-flexible title
+            let ws = state.workspace.borrow();
+            let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+            let tab = window.active_tab();
+            let (stored_title, stored_flexible) = match &tab.root {
+                LayoutNode::Split(outer) => match &outer.children[1] {
+                    LayoutNode::Split(nested) => match nested.children.last().unwrap() {
+                        LayoutNode::Tabs(group) => {
+                            let inner = group.tabs.first().unwrap();
+                            (inner.title.clone(), inner.flexible)
+                        }
+                        _ => panic!("expected tabs node"),
+                    },
+                    _ => panic!("expected nested split"),
+                },
+                _ => panic!("expected split root"),
+            };
+            assert_eq!(stored_title, new_title);
+            assert!(!stored_flexible, "edited title must be custom (non-flexible)");
+            drop(ws);
+
+            // Trigger a rebuild to ensure program doesn't reset the title
+            state.rebuild_window(window_id);
+            pump_events();
+
+            // After rebuild, title must remain the custom one
+            let controller = controller_for(&state, window_id);
+            let editable = {
+                let map = controller.inner_tab_labels.borrow();
+                map.get(&first_inner_id)
+                    .cloned()
+                    .expect("editable inner tab label after rebuild")
+            };
+            let container = editable.widget();
+            let stack = container
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Stack>().ok())
+                .expect("stack child after rebuild");
+            let label_after = stack
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Label>().ok())
+                .expect("label after rebuild");
+            assert_eq!(label_after.text().to_string(), new_title);
+
+            // Also simulate a terminal title change on the inner's focused terminal; title must not revert
+            state.handle_terminal_title_changed(first_focus_id);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            let editable = {
+                let map = controller.inner_tab_labels.borrow();
+                map.get(&first_inner_id)
+                    .cloned()
+                    .expect("editable inner tab label after title change")
+            };
+            let container = editable.widget();
+            let stack = container
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Stack>().ok())
+                .expect("stack child after change");
+            let label_after_change = stack
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Label>().ok())
+                .expect("label after title change");
+            assert_eq!(label_after_change.text().to_string(), new_title);
         });
     }
 
@@ -3202,6 +3602,115 @@ mod gui_tests {
                 "unexpected tree shape: {}",
                 shape
             );
+
+            // Width proportions should be reasonable (>= 20%) at both levels
+            assert_paned_min_child_percent_width(&top_paned, 0.20);
+            assert_paned_min_child_percent_width(&nested, 0.20);
+
+            // Focus must match model
+            assert_focus_matches_model(&state, window_id);
+        });
+    }
+
+    #[test]
+    fn gui_double_vertical_split_three_panes_min_20_percent() {
+        run_gui_test("double_vertical_min_20pct", |state, window_id| {
+            pump_events();
+
+            // Perform two vertical splits on the active terminal
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            // Inspect the widget tree and validate sizes
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            assert_eq!(top.orientation(), Orientation::Vertical);
+            // Each split child must be at least 20% of its paned height
+            assert_paned_min_child_percent(&top, 0.20);
+
+            // Right/bottom branch should be a nested vertical split with two panes
+            let (_, bottom_widget) = paned_children(&top);
+            let nested = bottom_widget.downcast::<Paned>().expect("nested vertical paned");
+            assert_eq!(nested.orientation(), Orientation::Vertical);
+            assert_paned_min_child_percent(&nested, 0.20);
+
+            // Also ensure all visible terminals are realized and visible
+            assert_all_terminals_visible(&state, window_id);
+        });
+    }
+
+    #[test]
+    fn gui_unfocus_window_does_not_reset_split_proportions() {
+        run_gui_test("unfocus_keeps_proportions", |state, window_id| {
+            pump_events();
+
+            // Make two vertical splits to have 3 panes in a column
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            // Access the top-level paned and nested paned
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            assert_eq!(top.orientation(), Orientation::Vertical);
+            let top_alloc = top.allocation();
+            let (top_start, top_end) = paned_children(&top);
+            let nested = top_end.clone().downcast::<Paned>().expect("nested vertical paned");
+            assert_eq!(nested.orientation(), Orientation::Vertical);
+            let nested_alloc = nested.allocation();
+            let (nested_start, nested_end) = paned_children(&nested);
+
+            // Record fractional heights before unfocus
+            let t_before = (
+                top_start.allocation().height() as f64 / top_alloc.height() as f64,
+                top_end.allocation().height() as f64 / top_alloc.height() as f64,
+            );
+            let n_before = (
+                nested_start.allocation().height() as f64 / nested_alloc.height() as f64,
+                nested_end.allocation().height() as f64 / nested_alloc.height() as f64,
+            );
+
+            // Unfocus the window by presenting a second toplevel
+            let other = gtk4::Window::new();
+            other.set_title(Some("Other"));
+            other.present();
+            pump_events();
+
+            // Re-fetch allocations after unfocus
+            let top_alloc2 = top.allocation();
+            let t_after = (
+                top_start.allocation().height() as f64 / top_alloc2.height() as f64,
+                top_end.allocation().height() as f64 / top_alloc2.height() as f64,
+            );
+            let nested_alloc2 = nested.allocation();
+            let n_after = (
+                nested_start.allocation().height() as f64 / nested_alloc2.height() as f64,
+                nested_end.allocation().height() as f64 / nested_alloc2.height() as f64,
+            );
+
+            // Allow a small tolerance for re-layout noise, but proportions must not reset
+            let tol = 0.05f64; // 5%
+            assert!(
+                (t_before.0 - t_after.0).abs() <= tol && (t_before.1 - t_after.1).abs() <= tol,
+                "top-level split proportions changed too much: before={:?} after={:?}",
+                t_before,
+                t_after
+            );
+            assert!(
+                (n_before.0 - n_after.0).abs() <= tol && (n_before.1 - n_after.1).abs() <= tol,
+                "nested split proportions changed too much: before={:?} after={:?}",
+                n_before,
+                n_after
+            );
+
+            other.close();
         });
     }
 
@@ -3218,6 +3727,17 @@ mod gui_tests {
 
             let controller = controller_for(&state, window_id);
             assert_eq!(controller.notebook.n_pages(), 2);
+
+            // Capture initial tab IDs for stability checking
+            let initial_ids: Vec<TabId> = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.tabs.iter().map(|t| t.id).collect()
+            };
 
             let tab_id = state.current_tab_id(window_id).expect("tab id");
             state.split_active(window_id, SplitOrientation::Horizontal);
@@ -3244,7 +3764,7 @@ mod gui_tests {
             drop(ws);
 
             // Stability: run several event cycles and assert tabs remain exactly two
-            for _ in 0..50 {
+            for _ in 0..100 {
                 pump_events();
                 let controller = controller_for(&state, window_id);
                 assert_eq!(
@@ -3262,8 +3782,98 @@ mod gui_tests {
                 assert_eq!(window.tabs.len(), 2, "workspace must have exactly two tabs");
                 // Validate IDs haven't changed
                 let ids: Vec<TabId> = window.tabs.iter().map(|t| t.id).collect();
-                assert_eq!(ids.len(), 2);
+                assert_eq!(ids, initial_ids, "tab IDs changed unexpectedly");
             }
+        });
+    }
+
+    #[test]
+    fn gui_inner_tabs_label_close_button_visible_and_clickable() {
+        run_gui_test("inner_tabs_close_button", |state, window_id| {
+            pump_events();
+
+            // Create nested inner tabs at bottom-right
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            // Find inner notebook
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            let (_, right_widget) = paned_children(&top);
+            let nested = right_widget.downcast::<Paned>().expect("nested paned");
+            let (_, right_end) = paned_children(&nested);
+            let inner_notebook = right_end.downcast::<Notebook>().expect("inner notebook");
+
+            assert!(inner_notebook.n_pages() >= 2, "need at least two inner tabs");
+
+            // Get label widget for the second tab (index 1) and its close button
+            let second_page = inner_notebook.nth_page(Some(1)).expect("second inner page");
+            let label_widget = inner_notebook.tab_label(&second_page).expect("inner label widget");
+            assert_widget_ready(&label_widget);
+
+            // The label_widget is a Box that contains EditableTabLabel stack + a Button
+            let mut child = label_widget.first_child().expect("label has child");
+            let mut close_btn = None;
+            loop {
+                if let Ok(btn) = child.clone().downcast::<gtk4::Button>() {
+                    close_btn = Some(btn);
+                    break;
+                }
+                if let Some(next) = child.next_sibling() {
+                    child = next;
+                } else {
+                    break;
+                }
+            }
+            let close_btn = close_btn.expect("close button present");
+            assert!(close_btn.is_visible(), "close (x) button should be visible");
+            assert!(close_btn.is_sensitive(), "close (x) button should be sensitive");
+
+            // Click the close button
+            close_btn.emit_by_name::<()>("clicked", &[]);
+            pump_events();
+
+            assert_eq!(inner_notebook.n_pages(), 1, "closing inner tab should reduce page count");
+        });
+    }
+
+    #[test]
+    fn gui_switch_inner_tab_by_clicking_label() {
+        run_gui_test("inner_tabs_click_label", |state, window_id| {
+            pump_events();
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top = page.downcast::<Paned>().expect("top paned");
+            let (_, right_widget) = paned_children(&top);
+            let nested = right_widget.downcast::<Paned>().expect("nested paned");
+            let (_, right_end) = paned_children(&nested);
+            let inner_notebook = right_end.downcast::<Notebook>().expect("inner notebook");
+
+            assert_eq!(inner_notebook.n_pages(), 2, "expected two inner tabs");
+
+            // Activate the second tab by simulating a click on its label via setting current page
+            // Note: Real pointer injection is limited in tests; switching via API mirrors click behavior here.
+            inner_notebook.set_current_page(Some(1));
+            pump_events();
+            assert_eq!(inner_notebook.current_page().unwrap(), 1);
+
+            // Focus and model should reflect the second tab's terminal
+            assert_focus_matches_model(&state, window_id);
         });
     }
 }

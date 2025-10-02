@@ -366,6 +366,7 @@ impl WorkspaceModel {
             let window = &mut self.windows[window_idx];
             if let Some(tab_idx) = window.tabs.iter().position(|t| t.id == tab_id) {
                 let tab = &mut window.tabs[tab_idx];
+                // First, try removing from a top-level Tabs group
                 if let Some(group) = tab.root.as_tabs_mut() {
                     if let Some(idx) = group.tabs.iter().position(|i| i.id == inner_id) {
                         group.tabs.remove(idx);
@@ -381,6 +382,18 @@ impl WorkspaceModel {
                                 group.active = group.tabs.len() - 1;
                             }
                             if let Some(first) = group.tabs[group.active].root.first_terminal_id() {
+                                tab.focus = first;
+                            }
+                        }
+                    }
+                }
+                // If not changed, try nested removal anywhere in the tree
+                if !changed {
+                    if tab.root.remove_inner_by_id_recursive(inner_id) {
+                        changed = true;
+                        // Fix focus if it points to a removed terminal
+                        if !tab.contains_terminal(tab.focus) {
+                            if let Some(first) = tab.first_terminal_id() {
                                 tab.focus = first;
                             }
                         }
@@ -421,6 +434,9 @@ impl WindowModel {
 }
 
 impl TabModel {
+    pub fn active_inner_id(&self) -> Option<InnerTabId> {
+        self.root.find_inner_id_for_terminal(self.focus)
+    }
     fn single_terminal_tab() -> (Self, TerminalId) {
         let terminal_id = TerminalId(Uuid::new_v4());
         let node_id = NodeId(Uuid::new_v4());
@@ -588,6 +604,31 @@ impl LayoutNode {
         }
     }
 
+    pub fn find_inner_id_for_terminal(&self, target: TerminalId) -> Option<InnerTabId> {
+        match self {
+            LayoutNode::Terminal(_) => None,
+            LayoutNode::Split(split) => {
+                for child in &split.children {
+                    if let Some(id) = child.find_inner_id_for_terminal(target) {
+                        return Some(id);
+                    }
+                }
+                None
+            }
+            LayoutNode::Tabs(group) => {
+                for inner in &group.tabs {
+                    if inner.root.contains_terminal(target) {
+                        return Some(inner.id);
+                    }
+                    if let Some(id) = inner.root.find_inner_id_for_terminal(target) {
+                        return Some(id);
+                    }
+                }
+                None
+            }
+        }
+    }
+
     // If there is a Tabs group that contains the target terminal, append a new inner tab to that group.
     // Returns true if a group was found and modified.
     fn add_inner_to_group_containing(
@@ -718,6 +759,49 @@ impl LayoutNode {
                     }
                 }
                 false
+            }
+        }
+    }
+
+    // Remove an inner tab by id anywhere in this subtree. Returns true if removed.
+    fn remove_inner_by_id_recursive(&mut self, inner_id: InnerTabId) -> bool {
+        match self {
+            LayoutNode::Terminal(_) => false,
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.remove_inner_by_id_recursive(inner_id) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Tabs(group) => {
+                if let Some(idx) = group.tabs.iter().position(|i| i.id == inner_id) {
+                    group.tabs.remove(idx);
+                    if group.tabs.is_empty() {
+                        *self = LayoutNode::Split(SplitNode {
+                            node_id: NodeId(Uuid::new_v4()),
+                            orientation: SplitOrientation::Vertical,
+                            children: Vec::new(),
+                        });
+                    } else {
+                        if idx == 0 {
+                            group.active = 0;
+                        } else if idx - 1 < group.tabs.len() {
+                            group.active = idx - 1;
+                        } else {
+                            group.active = group.tabs.len() - 1;
+                        }
+                    }
+                    true
+                } else {
+                    for inner in &mut group.tabs {
+                        if inner.root.remove_inner_by_id_recursive(inner_id) {
+                            return true;
+                        }
+                    }
+                    false
+                }
             }
         }
     }
@@ -1121,6 +1205,81 @@ mod tests {
             }
             other => panic!("expected outer split as root, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn close_first_inner_tab_in_nested_group() {
+        // Sequence: O (vertical), E (horizontal on new), U (new inner), then close first inner tab
+        let (mut ws, window_id, tab_id, first) = setup_workspace();
+
+        let right = ws
+            .split_terminal(window_id, first, SplitOrientation::Vertical)
+            .expect("vertical split created");
+
+        let bottom_right = ws
+            .split_terminal(window_id, right, SplitOrientation::Horizontal)
+            .expect("horizontal split on right");
+
+        let (_inner_id, _new_term) = ws
+            .add_inner_tab(window_id, tab_id, bottom_right)
+            .expect("inner tab added at bottom-right");
+
+        // Locate nested group at bottom-right and capture the first inner id
+        let first_inner_id = {
+            let window = &ws.windows[0];
+            let tab = &window.tabs[0];
+            match &tab.root {
+                LayoutNode::Split(outer) => match &outer.children[1] {
+                    LayoutNode::Split(inner) => match inner.children.last().unwrap() {
+                        LayoutNode::Tabs(group) => group.tabs.first().unwrap().id,
+                        other => panic!("expected tabs node, got {:?}", other),
+                    },
+                    other => panic!("expected nested split on right, got {:?}", other),
+                },
+                other => panic!("expected split root, got {:?}", other),
+            }
+        };
+
+        assert!(ws.close_inner_tab(window_id, tab_id, first_inner_id));
+
+        // Verify there is still a Tabs group at bottom-right with exactly 1 inner tab
+        let window = &ws.windows[0];
+        let tab = &window.tabs[0];
+        match &tab.root {
+            LayoutNode::Split(outer) => match &outer.children[1] {
+                LayoutNode::Split(inner) => match inner.children.last().unwrap() {
+                    LayoutNode::Tabs(group) => assert_eq!(group.tabs.len(), 1),
+                    other => panic!("expected tabs node after close, got {:?}", other),
+                },
+                other => panic!("expected nested right split after close, got {:?}", other),
+            },
+            other => panic!("expected split root after close, got {:?}", other),
+        }
+
+        // Ensure workspace still has one window and one top-level tab
+        assert_eq!(ws.windows.len(), 1);
+        assert_eq!(ws.windows[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn closing_all_inner_tabs_removes_parent_tab_and_window() {
+        let (mut ws, window_id, tab_id, term) = setup_workspace();
+        let (_id2, _new_term) = ws
+            .add_inner_tab(window_id, tab_id, term)
+            .expect("inner added");
+        // Now two inner tabs at top-level group
+        let (id_a, id_b) = {
+            let window = &ws.windows[0];
+            let tab = &window.tabs[0];
+            match &tab.root {
+                LayoutNode::Tabs(group) => (group.tabs[0].id, group.tabs[1].id),
+                other => panic!("expected tabs at top-level, got {:?}", other),
+            }
+        };
+        assert!(ws.close_inner_tab(window_id, tab_id, id_a));
+        assert!(ws.close_inner_tab(window_id, tab_id, id_b));
+        // Removing last inner removes parent tab, which removes only tab -> window list empty
+        assert!(ws.windows.is_empty());
     }
 }
 
