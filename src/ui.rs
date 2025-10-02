@@ -97,6 +97,14 @@ impl EditableTitleBar {
         *self.inner.last_dynamic.borrow_mut() = dynamic.to_string();
         self.inner.stack.set_visible_child_name("label");
     }
+
+    pub fn begin_edit(&self) {
+        self.inner.begin_edit();
+    }
+
+    pub fn commit_edit(&self, text: &str) {
+        self.inner.finish_edit(Some(text.to_string()));
+    }
 }
 
 struct EditableTitleBarInner {
@@ -117,8 +125,9 @@ impl EditableTitleBarInner {
     fn setup_interactions(self: &Rc<Self>) {
         let gesture = GestureClick::new();
         gesture.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+        gesture.set_propagation_phase(gtk4::PropagationPhase::Bubble);
         let this = Rc::clone(self);
-        gesture.connect_pressed(move |gesture, n_press, _, _| {
+        gesture.connect_released(move |gesture, n_press, _, _| {
             if n_press == 2 {
                 gesture.set_state(EventSequenceState::Claimed);
                 this.begin_edit();
@@ -284,8 +293,9 @@ impl EditableTabLabelInner {
     fn setup_interactions(self: &Rc<Self>) {
         let gesture = GestureClick::new();
         gesture.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+        gesture.set_propagation_phase(gtk4::PropagationPhase::Bubble);
         let this = Rc::clone(self);
-        gesture.connect_pressed(move |gesture, n_press, _, _| {
+        gesture.connect_released(move |gesture, n_press, _, _| {
             if n_press == 2 {
                 gesture.set_state(EventSequenceState::Claimed);
                 this.begin_edit();

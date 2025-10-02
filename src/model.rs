@@ -146,6 +146,144 @@ impl WorkspaceModel {
         self.windows.retain(|w| w.id != window_id);
     }
 
+    pub fn rename_window(&mut self, window_id: WindowId, title: String) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == window_id) {
+            w.title = title;
+        }
+    }
+
+    // Move a terminal to split with a target terminal, creating a split at the target.
+    #[allow(dead_code)]
+    pub fn move_terminal_to_split(
+        &mut self,
+        window_id: WindowId,
+        moving: TerminalId,
+        target: TerminalId,
+        orientation: SplitOrientation,
+    ) -> bool {
+        let window = match self.windows.iter_mut().find(|w| w.id == window_id) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // Find the index of the tab containing the target first to avoid overlapping borrows.
+        let tab_index = match window
+            .tabs
+            .iter()
+            .position(|t| t.contains_terminal(target))
+        {
+            Some(i) => i,
+            None => return false,
+        };
+
+        // Remove moving terminal from wherever it is within this window
+        let removed = window
+            .tabs
+            .iter_mut()
+            .any(|t| t.remove_terminal(moving));
+        if !removed {
+            return false;
+        }
+
+        // Now operate on the previously found tab by index
+        let tab = &mut window.tabs[tab_index];
+        let replaced = tab
+            .root
+            .replace_leaf_with_split_existing(target, orientation, moving);
+        if replaced {
+            tab.set_focus_terminal(moving);
+        }
+        replaced
+    }
+
+    #[allow(dead_code)]
+    pub fn move_terminal_to_new_tab(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<TabId> {
+        let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
+        // Remove from any tab
+        let removed = window
+            .tabs
+            .iter_mut()
+            .any(|t| t.remove_terminal(terminal_id));
+        if !removed {
+            return None;
+        }
+        // Create new tab with that terminal as single root
+        let leaf = TerminalLeaf {
+            node_id: NodeId(Uuid::new_v4()),
+            terminal_id,
+            title: String::from("Terminal"),
+            title_flexible: true,
+        };
+        let tab = TabModel {
+            id: TabId(Uuid::new_v4()),
+            root: LayoutNode::Terminal(leaf),
+            focus: terminal_id,
+            title: String::from("Terminal"),
+            title_flexible: true,
+            dynamic_title: String::new(),
+        };
+        let id = tab.id;
+        window.tabs.push(tab);
+        window.active_tab = window.tabs.len() - 1;
+        Some(id)
+    }
+
+    #[allow(dead_code)]
+    pub fn move_terminal_to_new_window(&mut self, terminal_id: TerminalId) -> Option<WindowId> {
+        // Remove from any existing window/tab
+        let mut removed = false;
+        for w in &mut self.windows {
+            if w.tabs.iter_mut().any(|t| t.remove_terminal(terminal_id)) {
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return None;
+        }
+        // Create new window with this terminal
+        let id = WindowId(Uuid::new_v4());
+        let leaf = TerminalLeaf {
+            node_id: NodeId(Uuid::new_v4()),
+            terminal_id,
+            title: String::from("Terminal"),
+            title_flexible: true,
+        };
+        let tab = TabModel {
+            id: TabId(Uuid::new_v4()),
+            root: LayoutNode::Terminal(leaf),
+            focus: terminal_id,
+            title: String::from("Terminal"),
+            title_flexible: true,
+            dynamic_title: String::new(),
+        };
+        self.windows.push(WindowModel {
+            id,
+            title: String::from("Terminator"),
+            tabs: vec![tab],
+            active_tab: 0,
+        });
+        Some(id)
+    }
+
+    pub fn close_tab(&mut self, window_id: WindowId, tab_id: TabId) -> bool {
+        if let Some(widx) = self.windows.iter().position(|w| w.id == window_id) {
+            let window = &mut self.windows[widx];
+            if let Some(tidx) = window.tabs.iter().position(|t| t.id == tab_id) {
+                window.tabs.remove(tidx);
+                if window.tabs.is_empty() {
+                    self.windows.remove(widx);
+                } else {
+                    if window.active_tab >= window.tabs.len() {
+                        window.active_tab = window.tabs.len() - 1;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn first_terminal_in_tab(&self, window_id: WindowId, tab_id: TabId) -> Option<TerminalId> {
         let window = self.windows.iter().find(|w| w.id == window_id)?;
         let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
@@ -310,16 +448,7 @@ impl WorkspaceModel {
         let new_terminal_id = TerminalId(Uuid::new_v4());
         let inner_id = InnerTabId(Uuid::new_v4());
 
-        // 1) If there's already a Tabs group containing the target terminal, append to it
-        if tab
-            .root
-            .add_inner_to_group_containing(from_terminal, inner_id, new_terminal_id)
-        {
-            tab.focus = new_terminal_id;
-            return Some((inner_id, new_terminal_id));
-        }
-
-        // 2) Otherwise, wrap just the subtree that contains the target into a Tabs group
+        // 1) Prefer wrapping the exact subtree that contains the target into a Tabs group
         if tab
             .root
             .wrap_subtree_with_tabs_at(from_terminal, inner_id, new_terminal_id)
@@ -328,7 +457,17 @@ impl WorkspaceModel {
             return Some((inner_id, new_terminal_id));
         }
 
-        // 3) Fallback: wrap the whole tab at top-level (legacy behavior)
+        // 2) Otherwise, if there's an existing Tabs group that contains the target somewhere,
+        // append a new inner to that group (less precise, but acceptable fallback).
+        if tab
+            .root
+            .add_inner_to_group_containing(from_terminal, inner_id, new_terminal_id)
+        {
+            tab.focus = new_terminal_id;
+            return Some((inner_id, new_terminal_id));
+        }
+
+        // 3) Fallback: wrap the whole tab at top-level
         tab.ensure_tabs_group();
         if let LayoutNode::Tabs(group) = &mut tab.root {
             let new_inner = InnerTab {
@@ -374,6 +513,7 @@ impl WorkspaceModel {
                         if group.tabs.is_empty() {
                             remove_parent_tab = true;
                         } else {
+                            // Keep the Tabs group even when only one inner remains; just update active and focus
                             if idx == 0 {
                                 group.active = 0;
                             } else if idx - 1 < group.tabs.len() {
@@ -779,12 +919,14 @@ impl LayoutNode {
                 if let Some(idx) = group.tabs.iter().position(|i| i.id == inner_id) {
                     group.tabs.remove(idx);
                     if group.tabs.is_empty() {
+                        // Replace with an empty split placeholder; caller may collapse further.
                         *self = LayoutNode::Split(SplitNode {
                             node_id: NodeId(Uuid::new_v4()),
                             orientation: SplitOrientation::Vertical,
                             children: Vec::new(),
                         });
                     } else {
+                        // Keep Tabs even when one inner remains; update active index accordingly
                         if idx == 0 {
                             group.active = 0;
                         } else if idx - 1 < group.tabs.len() {
@@ -895,6 +1037,67 @@ impl LayoutNode {
                     inner
                         .root
                         .replace_leaf_with_split(target, orientation, new_terminal_id)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    // Replace the target leaf with a split, using an existing terminal id as the new sibling.
+    #[allow(dead_code)]
+    fn replace_leaf_with_split_existing(
+        &mut self,
+        target: TerminalId,
+        orientation: SplitOrientation,
+        moving_terminal_id: TerminalId,
+    ) -> bool {
+        match self {
+            LayoutNode::Terminal(leaf) => {
+                if leaf.terminal_id == target {
+                    let existing = std::mem::replace(
+                        self,
+                        LayoutNode::Split(SplitNode {
+                            node_id: NodeId(Uuid::new_v4()),
+                            orientation,
+                            children: Vec::new(),
+                        }),
+                    );
+                    if let LayoutNode::Split(split_node) = self {
+                        let existing_leaf = existing;
+                        let new_leaf = LayoutNode::Terminal(TerminalLeaf {
+                            node_id: NodeId(Uuid::new_v4()),
+                            terminal_id: moving_terminal_id,
+                            title: String::from("Terminal"),
+                            title_flexible: true,
+                        });
+                        split_node.children.push(existing_leaf);
+                        split_node.children.push(new_leaf);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.replace_leaf_with_split_existing(
+                        target,
+                        orientation,
+                        moving_terminal_id,
+                    ) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Tabs(group) => {
+                if let Some(inner) = group.tabs.get_mut(group.active) {
+                    inner
+                        .root
+                        .replace_leaf_with_split_existing(target, orientation, moving_terminal_id)
                 } else {
                     false
                 }
