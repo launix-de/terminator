@@ -2,13 +2,13 @@ mod model;
 mod ui;
 
 use crate::model::{
-    ActionId, InnerTabId, KeybindingMap, LayoutNode, SplitNode, SplitOrientation, TabGroup, TabId,
-    TerminalId, TerminalLeaf, WindowId, WindowModel, WorkspaceModel,
+    ActionId, FocusDirection, InnerTabId, KeybindingMap, LayoutNode, SplitNode, SplitOrientation,
+    TabGroup, TabId, TerminalId, TerminalLeaf, WindowId, WindowModel, WorkspaceModel,
 };
 use crate::ui::{EditableTabLabel, EditableTitleBar};
 use glib::signal::{signal_handler_block, signal_handler_unblock};
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, Dialog, Entry, EventControllerFocus, GestureClick,
+    Application, ApplicationWindow, Box, Button, Dialog, Entry, EventControllerFocus, EventControllerMotion, GestureClick,
     HeaderBar, Image, Label, ListBox, ListBoxRow, Notebook, Orientation, Paned, PopoverMenu,
     ResponseType, StyleContext,
     gdk::{RGBA, Rectangle},
@@ -38,6 +38,12 @@ const ACTION_DEFS: &[(ActionId, &str)] = &[
     (ActionId::Settings, "Settings"),
     (ActionId::Close, "Close"),
     (ActionId::CloseInnerTab, "Close Inner Tab"),
+    (ActionId::FocusLeft, "Focus Left"),
+    (ActionId::FocusRight, "Focus Right"),
+    (ActionId::FocusUp, "Focus Up"),
+    (ActionId::FocusDown, "Focus Down"),
+    (ActionId::NextTab, "Next Tab"),
+    (ActionId::PrevTab, "Previous Tab"),
 ];
 
 fn main() -> gtk4::glib::ExitCode {
@@ -324,13 +330,7 @@ impl AppState {
                 self.registry.borrow_mut().ensure_terminal(new_id);
                 let tab_id = current_tab.or_else(|| self.current_tab_id(window_id));
                 if let Some(tab_id_value) = tab_id {
-                    {
-                        let mut workspace = self.workspace.borrow_mut();
-                        workspace.set_active_terminal(window_id, tab_id_value, new_id);
-                    }
-                    self.last_focus
-                        .borrow_mut()
-                        .insert(window_id, (tab_id_value, new_id));
+                    self.set_active_terminal_no_rebuild(window_id, tab_id_value, new_id);
                 }
                 self.rebuild_window(window_id);
                 if let Some(tab_id_value) = tab_id {
@@ -534,15 +534,11 @@ impl AppState {
         tab_id: TabId,
         terminal: TerminalId,
     ) {
-        let changed = self
-            .workspace
-            .borrow_mut()
-            .set_active_terminal(window_id, tab_id, terminal);
+        let changed = {
+            let mut workspace = self.workspace.borrow_mut();
+            workspace.set_active_terminal(window_id, tab_id, terminal)
+        };
         if changed {
-            self.last_focus
-                .borrow_mut()
-                .insert(window_id, (tab_id, terminal));
-
             let weak = Rc::downgrade(self);
             glib::idle_add_local(move || {
                 if let Some(app_state) = weak.upgrade() {
@@ -552,6 +548,69 @@ impl AppState {
                 glib::ControlFlow::Break
             });
         }
+    }
+
+    fn set_active_terminal_no_rebuild(
+        self: &Rc<Self>,
+        window_id: WindowId,
+        tab_id: TabId,
+        terminal: TerminalId,
+    ) -> bool {
+        let changed = {
+            let mut workspace = self.workspace.borrow_mut();
+            workspace.set_active_terminal(window_id, tab_id, terminal)
+        };
+        if changed {
+            self.focus_and_remember(window_id, tab_id, terminal);
+        }
+        changed
+    }
+
+    fn move_focus(self: &Rc<Self>, window_id: WindowId, direction: FocusDirection) {
+        let tab_id = match self.current_tab_id(window_id) {
+            Some(id) => id,
+            None => return,
+        };
+
+        let current_terminal = {
+            let ws = self.workspace.borrow();
+            let window = match ws.windows.iter().find(|w| w.id == window_id) {
+                Some(window) => window,
+                None => return,
+            };
+            window.active_tab().active_terminal()
+        };
+
+        let next_terminal = {
+            let ws = self.workspace.borrow();
+            ws.focus_neighbor(window_id, tab_id, current_terminal, direction)
+        };
+
+        if let Some(next) = next_terminal {
+            self.set_active_terminal(window_id, tab_id, next);
+        }
+    }
+
+    fn cycle_tab(self: &Rc<Self>, window_id: WindowId, forward: bool) {
+        let next_tab = {
+            let ws = self.workspace.borrow();
+            let window = match ws.windows.iter().find(|w| w.id == window_id) {
+                Some(window) => window,
+                None => return,
+            };
+            if window.tabs.len() <= 1 {
+                return;
+            }
+            let len = window.tabs.len();
+            let next_index = if forward {
+                (window.active_tab + 1) % len
+            } else {
+                (window.active_tab + len - 1) % len
+            };
+            window.tabs[next_index].id
+        };
+
+        self.set_active_tab(window_id, next_tab);
     }
 
     fn apply_settings(&self, bindings: KeybindingMap) {
@@ -684,6 +743,9 @@ struct WorkspaceController {
     tab_labels: RefCell<HashMap<TabId, EditableTabLabel>>,
     inner_tab_labels: RefCell<HashMap<InnerTabId, EditableTabLabel>>,
     suppress_focus: Cell<bool>,
+    context_menu_states: RefCell<HashMap<TerminalId, Rc<Cell<bool>>>>,
+    context_menu_gestures: RefCell<HashMap<TerminalId, GestureClick>>,
+    hover_motions: RefCell<HashMap<TerminalId, EventControllerMotion>>,
 }
 
 impl WorkspaceController {
@@ -738,6 +800,9 @@ impl WorkspaceController {
             tab_labels: RefCell::new(HashMap::new()),
             inner_tab_labels: RefCell::new(HashMap::new()),
             suppress_focus: Cell::new(false),
+            context_menu_states: RefCell::new(HashMap::new()),
+            context_menu_gestures: RefCell::new(HashMap::new()),
+            hover_motions: RefCell::new(HashMap::new()),
         });
 
         controller.install_actions();
@@ -871,6 +936,72 @@ impl WorkspaceController {
             }
         });
         action_group.add_action(&settings);
+
+        let weak_self = Rc::downgrade(self);
+        let focus_left = gio::SimpleAction::new("focus_left", None);
+        focus_left.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.move_focus(controller.window_id, FocusDirection::Left);
+                }
+            }
+        });
+        action_group.add_action(&focus_left);
+
+        let weak_self = Rc::downgrade(self);
+        let focus_right = gio::SimpleAction::new("focus_right", None);
+        focus_right.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.move_focus(controller.window_id, FocusDirection::Right);
+                }
+            }
+        });
+        action_group.add_action(&focus_right);
+
+        let weak_self = Rc::downgrade(self);
+        let focus_up = gio::SimpleAction::new("focus_up", None);
+        focus_up.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.move_focus(controller.window_id, FocusDirection::Up);
+                }
+            }
+        });
+        action_group.add_action(&focus_up);
+
+        let weak_self = Rc::downgrade(self);
+        let focus_down = gio::SimpleAction::new("focus_down", None);
+        focus_down.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.move_focus(controller.window_id, FocusDirection::Down);
+                }
+            }
+        });
+        action_group.add_action(&focus_down);
+
+        let weak_self = Rc::downgrade(self);
+        let next_tab = gio::SimpleAction::new("next_tab", None);
+        next_tab.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.cycle_tab(controller.window_id, true);
+                }
+            }
+        });
+        action_group.add_action(&next_tab);
+
+        let weak_self = Rc::downgrade(self);
+        let prev_tab = gio::SimpleAction::new("prev_tab", None);
+        prev_tab.connect_activate(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                if let Some(state) = controller.state.upgrade() {
+                    state.cycle_tab(controller.window_id, false);
+                }
+            }
+        });
+        action_group.add_action(&prev_tab);
 
         self.window.insert_action_group("term", Some(&action_group));
     }
@@ -1120,6 +1251,28 @@ impl WorkspaceController {
                 }
             });
             terminal.add_controller(focus_controller);
+
+            // Pointer hover focus: when the mouse enters a terminal, make it active
+            let motion = EventControllerMotion::new();
+            let weak_self = Rc::downgrade(self);
+            let hover_tab = tab_id;
+            let hover_terminal = leaf.terminal_id;
+            motion.connect_enter(move |_, _x, _y| {
+                if let Some(controller) = weak_self.upgrade() {
+                    if let Some(state) = controller.state.upgrade() {
+                        state.set_active_terminal(controller.window_id, hover_tab, hover_terminal);
+                    }
+                }
+            });
+            terminal.add_controller(motion.clone());
+
+            // Keep a handle for tests to simulate enter events
+            if let Some(controller) = self.state.upgrade().and_then(|_| Some(self.clone())) {
+                controller
+                    .hover_motions
+                    .borrow_mut()
+                    .insert(leaf.terminal_id, motion);
+            }
         }
 
         self.install_terminal_menu(&terminal, tab_id, leaf.terminal_id);
@@ -1266,6 +1419,12 @@ impl WorkspaceController {
             let term_clone = terminal.clone();
             // Per-terminal open state to prevent multiple popovers
             let open_state: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+            self.context_menu_states
+                .borrow_mut()
+                .insert(terminal_id, open_state.clone());
+            self.context_menu_gestures
+                .borrow_mut()
+                .insert(terminal_id, gesture.clone());
             gesture.connect_pressed(move |gesture, _, x, y| {
                 if open_state.get() {
                     gesture.set_state(gtk4::EventSequenceState::Claimed);
@@ -1273,7 +1432,11 @@ impl WorkspaceController {
                 }
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
-                        state.set_active_terminal(controller.window_id, tab_id, terminal_id);
+                        state.set_active_terminal_no_rebuild(
+                            controller.window_id,
+                            tab_id,
+                            terminal_id,
+                        );
                         let bindings = state.workspace.borrow().keybindings.clone();
                         let menu = build_context_menu(&bindings);
                         let popover = PopoverMenu::from_model(Some(&menu));
@@ -1835,6 +1998,12 @@ fn action_name(action: ActionId) -> &'static str {
         Settings => "term.settings",
         Close => "term.close",
         CloseInnerTab => "term.close_inner_tab",
+        FocusLeft => "term.focus_left",
+        FocusRight => "term.focus_right",
+        FocusUp => "term.focus_up",
+        FocusDown => "term.focus_down",
+        NextTab => "term.next_tab",
+        PrevTab => "term.prev_tab",
     }
 }
 
@@ -1873,10 +2042,14 @@ fn format_terminal_title(terminal: &Terminal, fallback: &str, flexible: bool) ->
 #[cfg(test)]
 mod gui_tests {
     use super::*;
+    use gtk4::prelude::{GtkWindowExt, WidgetExt, WidgetExtManual};
+    use gtk4::{Notebook, Orientation, Paned, Widget};
+    use std::convert::TryInto;
     use std::panic::AssertUnwindSafe;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use vte4::Terminal as VteTerminal;
 
     fn pump_events() {
         let context = glib::MainContext::default();
@@ -1897,6 +2070,229 @@ mod gui_tests {
             test: StdBox<dyn FnOnce(Rc<AppState>, WindowId) + Send + 'static>,
             response: mpsc::Sender<GuiResponse>,
         },
+    }
+
+    fn controller_for(state: &Rc<AppState>, window_id: WindowId) -> Rc<WorkspaceController> {
+        state
+            .controllers
+            .borrow()
+            .get(&window_id)
+            .cloned()
+            .expect("controller")
+    }
+
+    fn wait_for_widget<W: IsA<Widget>>(widget: &W) {
+        for _ in 0..40 {
+            if widget.is_realized() && widget.is_visible() {
+                let alloc = widget.allocation();
+                if alloc.width() > 0 && alloc.height() > 0 {
+                    return;
+                }
+            }
+            pump_events();
+        }
+        panic!("widget never realized/allocated");
+    }
+
+    fn assert_widget_ready<W: IsA<Widget>>(widget: &W) {
+        wait_for_widget(widget);
+        assert!(widget.is_mapped(), "widget should be mapped");
+        let alloc = widget.allocation();
+        assert!(
+            alloc.width() > 0 && alloc.height() > 0,
+            "widget has non-positive size"
+        );
+    }
+
+    fn assert_widget_clickable<W: IsA<Widget>>(widget: &W) {
+        assert_widget_ready(widget);
+        assert!(widget.is_sensitive(), "widget should be sensitive");
+    }
+
+    fn active_page_widget(controller: &WorkspaceController) -> Widget {
+        let index = controller.notebook.current_page().expect("current page") as u32;
+        controller
+            .notebook
+            .nth_page(Some(index))
+            .expect("page widget")
+    }
+
+    fn paned_children(paned: &Paned) -> (Widget, Widget) {
+        let start = paned.start_child().expect("paned start child");
+        let end = paned.end_child().expect("paned end child");
+        (start, end)
+    }
+
+    #[derive(Debug)]
+    enum ViewNode {
+        PanedH(StdBox<ViewNode>, StdBox<ViewNode>),
+        PanedV(StdBox<ViewNode>, StdBox<ViewNode>),
+        Notebook(Vec<ViewNode>),
+        Terminal,
+        Other,
+    }
+
+    fn build_view_tree(w: &Widget) -> ViewNode {
+        if let Ok(paned) = w.clone().downcast::<Paned>() {
+            let (left, right) = paned_children(&paned);
+            let l = build_view_tree(&left);
+            let r = build_view_tree(&right);
+            return match paned.orientation() {
+                Orientation::Horizontal => ViewNode::PanedH(StdBox::new(l), StdBox::new(r)),
+                Orientation::Vertical => ViewNode::PanedV(StdBox::new(l), StdBox::new(r)),
+                _ => ViewNode::Other,
+            };
+        }
+        if let Ok(notebook) = w.clone().downcast::<Notebook>() {
+            let mut pages = Vec::new();
+            for i in 0..notebook.n_pages() {
+                if let Some(page) = notebook.nth_page(Some(i)) {
+                    pages.push(build_view_tree(&page));
+                }
+            }
+            return ViewNode::Notebook(pages);
+        }
+        if w.is::<VteTerminal>() {
+            return ViewNode::Terminal;
+        }
+        // Try to descend into children if any
+        if let Some(mut child) = w.first_child() {
+            while let Some(cur) = child.clone().into() {
+                let node = build_view_tree(&child);
+                if !matches!(node, ViewNode::Other) {
+                    return node;
+                }
+                if let Some(next) = child.next_sibling() {
+                    child = next;
+                } else {
+                    break;
+                }
+            }
+        }
+        ViewNode::Other
+    }
+
+    fn view_to_string(node: &ViewNode) -> String {
+        match node {
+            ViewNode::PanedH(a, b) => format!("H({}, {})", view_to_string(a), view_to_string(b)),
+            ViewNode::PanedV(a, b) => format!("V({}, {})", view_to_string(a), view_to_string(b)),
+            ViewNode::Notebook(pages) => format!("Notebook({})", pages.len()),
+            ViewNode::Terminal => "Term".into(),
+            ViewNode::Other => "Other".into(),
+        }
+    }
+
+    fn collect_all_terminal_ids_window(
+        state: &Rc<AppState>,
+        window_id: WindowId,
+    ) -> Vec<TerminalId> {
+        let ws = state.workspace.borrow();
+        let window = ws
+            .windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .expect("window exists");
+        let mut all = Vec::new();
+        for tab in &window.tabs {
+            tab.collect_terminal_ids(&mut all);
+        }
+        all
+    }
+
+    fn assert_stable_window(
+        state: &Rc<AppState>,
+        window_id: WindowId,
+        expected_tabs: u32,
+        expected_terminals: usize,
+        cycles: usize,
+    ) {
+        for _ in 0..cycles {
+            pump_events();
+            let controller = controller_for(state, window_id);
+            assert_eq!(controller.notebook.n_pages(), expected_tabs);
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.tabs.len() as u32, expected_tabs);
+            drop(ws);
+            let all_terms = collect_all_terminal_ids_window(state, window_id);
+            assert_eq!(all_terms.len(), expected_terminals);
+        }
+    }
+
+    fn collect_active_tab_terminal_ids(
+        state: &Rc<AppState>,
+        window_id: WindowId,
+    ) -> Vec<TerminalId> {
+        let ws = state.workspace.borrow();
+        let window = ws
+            .windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .expect("window exists");
+        let tab = window.active_tab();
+        let mut ids = Vec::new();
+        tab.collect_terminal_ids(&mut ids);
+        ids
+    }
+
+    fn assert_all_terminals_visible(state: &Rc<AppState>, window_id: WindowId) {
+        let ids = collect_active_tab_terminal_ids(state, window_id);
+        for id in ids {
+            let term = state
+                .registry
+                .borrow()
+                .terminal(id)
+                .expect("terminal widget present");
+            assert_widget_ready(&term);
+        }
+    }
+
+    fn assert_paned_min_child_sizes(paned: &Paned, min: i32) {
+        let (left, right) = paned_children(paned);
+        assert_widget_ready(&left);
+        assert_widget_ready(&right);
+        let la = left.allocation();
+        let ra = right.allocation();
+        assert!(
+            la.width() >= min && la.height() >= min,
+            "left child too small"
+        );
+        assert!(
+            ra.width() >= min && ra.height() >= min,
+            "right child too small"
+        );
+    }
+
+    fn assert_stable_tab_count(
+        state: &Rc<AppState>,
+        window_id: WindowId,
+        expected: u32,
+        cycles: usize,
+    ) {
+        for _ in 0..cycles {
+            pump_events();
+            let controller = controller_for(state, window_id);
+            assert_eq!(
+                controller.notebook.n_pages(),
+                expected,
+                "notebook page count instability"
+            );
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(
+                window.tabs.len() as u32,
+                expected,
+                "workspace tab count instability"
+            );
+        }
     }
 
     fn gui_task_sender() -> &'static mpsc::Sender<GuiTask> {
@@ -1969,6 +2365,12 @@ mod gui_tests {
                                 let window_id = workspace.borrow().windows[0].id;
                                 state.ensure_window(window_id);
                                 pump_events();
+
+                                {
+                                    let controller = controller_for(&state, window_id);
+                                    assert_widget_ready(&controller.window);
+                                    assert_widget_ready(&controller.notebook);
+                                }
 
                                 test(state.clone(), window_id);
 
@@ -2073,6 +2475,15 @@ mod gui_tests {
                 .copied()
                 .expect("focus tracked");
             assert_eq!(remembered, (active_tab, active_terminal));
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top_paned = page.clone().downcast::<Paned>().expect("top paned");
+            assert_eq!(top_paned.orientation(), Orientation::Horizontal);
+            let (left_widget, right_widget) = paned_children(&top_paned);
+            assert_widget_clickable(&left_widget);
+            assert_widget_clickable(&right_widget);
         });
     }
 
@@ -2149,7 +2560,7 @@ mod gui_tests {
             };
 
             if let Some(tab_id) = state.current_tab_id(window_id) {
-                state.set_active_terminal(window_id, tab_id, right_terminal);
+                state.set_active_terminal_no_rebuild(window_id, tab_id, right_terminal);
             }
             pump_events();
 
@@ -2188,7 +2599,7 @@ mod gui_tests {
             };
 
             if let Some(tab_id) = state.current_tab_id(window_id) {
-                state.set_active_terminal(window_id, tab_id, bottom_right_terminal);
+                state.set_active_terminal_no_rebuild(window_id, tab_id, bottom_right_terminal);
             }
             pump_events();
 
@@ -2217,6 +2628,81 @@ mod gui_tests {
                 }
                 _ => panic!("expected outer split tree"),
             }
+        });
+    }
+
+    #[test]
+    fn gui_action_new_inner_tab_creates_nested_group() {
+        run_gui_test("action_inner_tab_nested", |state, window_id| {
+            pump_events();
+
+            // Start: create a right split, then split that vertically to get a bottom-right area
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let right_terminal = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let tab = window.active_tab();
+                match &tab.root {
+                    LayoutNode::Split(split) => match &split.children[1] {
+                        LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                        LayoutNode::Split(s) => match s.children.last().unwrap() {
+                            LayoutNode::Terminal(leaf) => leaf.terminal_id,
+                            LayoutNode::Split(inner) => inner
+                                .children
+                                .last()
+                                .and_then(|c| match c {
+                                    LayoutNode::Terminal(leaf) => Some(leaf.terminal_id),
+                                    LayoutNode::Tabs(group) => Some(group.tabs[group.active].focus),
+                                    LayoutNode::Split(_) => None,
+                                })
+                                .expect("right split contains terminal"),
+                            LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                        },
+                        LayoutNode::Tabs(group) => group.tabs[group.active].focus,
+                    },
+                    _ => panic!("expected split after first split"),
+                }
+            };
+
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal_no_rebuild(window_id, tab_id, right_terminal);
+            }
+            pump_events();
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            // Trigger inner tab creation through the window action (UI path)
+            let controller = controller_for(&state, window_id);
+            vte4::ActionGroupExt::activate_action(&controller.window, "term.new_inner_tab", None::<&glib::Variant>);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+            let tab = window.active_tab();
+            match &tab.root {
+                LayoutNode::Split(split) => {
+                    // Expect right branch to end with either a split whose last child is Tabs, or Tabs directly
+                    let right_branch = &split.children[1];
+                    let tabs_node = match right_branch {
+                        LayoutNode::Tabs(group) => Some(group),
+                        LayoutNode::Split(inner) => match inner.children.last().unwrap() {
+                            LayoutNode::Tabs(group) => Some(group),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let tabs_node = tabs_node.expect("expected nested tabs in right branch");
+                    assert!(tabs_node.tabs.len() >= 2, "nested tabs should be created");
+                }
+                other => panic!("expected split tree root, got {:?}", other),
+            }
+
+            // Ensure top-level notebook page count didn't change spuriously
+            let controller = controller_for(&state, window_id);
+            assert_eq!(controller.notebook.n_pages(), 1);
         });
     }
 
@@ -2251,13 +2737,16 @@ mod gui_tests {
                 );
             }
 
+            // Simulate hover by emitting the motion controller's `enter` event
             {
-                let terminal_widget = state
-                    .registry
-                    .borrow()
-                    .terminal(original_terminal)
-                    .expect("terminal widget");
-                terminal_widget.grab_focus();
+                let controller = controller_for(&state, window_id);
+                let motion = {
+                    let map = controller.hover_motions.borrow();
+                    map.get(&original_terminal)
+                        .cloned()
+                        .expect("hover motion controller")
+                };
+                motion.emit_by_name::<()>("enter", &[&0.0f64, &0.0f64]);
             }
 
             pump_events();
@@ -2284,6 +2773,497 @@ mod gui_tests {
                 active_terminal, original_terminal,
                 "workspace active terminal should match hovered terminal"
             );
+        });
+    }
+
+    #[test]
+    fn gui_context_menu_open_state_stable() {
+        run_gui_test("context_menu", |state, window_id| {
+            pump_events();
+
+            let terminal_id = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            let controller = {
+                let controllers = state.controllers.borrow();
+                controllers.get(&window_id).cloned().expect("controller")
+            };
+
+            let gesture = {
+                let map = controller.context_menu_gestures.borrow();
+                map.get(&terminal_id)
+                    .cloned()
+                    .expect("context menu gesture")
+            };
+
+            let open_state = {
+                let map = controller.context_menu_states.borrow();
+                map.get(&terminal_id).cloned().expect("context menu state")
+            };
+            assert!(!open_state.get(), "menu not open before click");
+
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+
+            gesture.emit_by_name::<()>("pressed", &[&1i32, &0.0f64, &0.0f64]);
+            pump_events();
+
+            assert!(open_state.get(), "menu should stay open after click");
+
+            let before_focus = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+            assert_eq!(
+                before_focus, terminal_id,
+                "active terminal tracks context target"
+            );
+
+            gesture.emit_by_name::<()>("pressed", &[&1i32, &0.0f64, &0.0f64]);
+            pump_events();
+
+            assert!(open_state.get(), "menu remains open on repeated press");
+
+            let after_focus = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+            assert_eq!(after_focus, terminal_id);
+
+            // Close the menu explicitly to avoid state leakage
+            controller.window.close();
+        });
+    }
+
+    #[test]
+    fn gui_focus_direction_moves_between_splits() {
+        run_gui_test("focus_direction", |state, window_id| {
+            pump_events();
+
+            let first = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let right = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.move_focus(window_id, FocusDirection::Left);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().active_terminal(), first);
+            drop(ws);
+
+            state.move_focus(window_id, FocusDirection::Right);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().active_terminal(), right);
+            drop(ws);
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            let bottom = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.move_focus(window_id, FocusDirection::Up);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().active_terminal(), right);
+            drop(ws);
+
+            state.move_focus(window_id, FocusDirection::Down);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().active_terminal(), bottom);
+            let existing_tabs: Vec<_> = window.tabs.iter().map(|t| t.id).collect();
+            drop(ws);
+
+            state.new_tab(window_id);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.tabs.len(), existing_tabs.len() + 1);
+            let second_tab_id = window.tabs[(window.active_tab + 1) % window.tabs.len()].id;
+            drop(ws);
+
+            state.cycle_tab(window_id, true);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().id, second_tab_id);
+            drop(ws);
+
+            let controller = controller_for(&state, window_id);
+            let expected_pages: u32 = (existing_tabs.len() + 1).try_into().unwrap();
+            assert_eq!(controller.notebook.n_pages(), expected_pages);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let paned = page.downcast::<Paned>().expect("paned");
+            assert_eq!(paned.orientation(), Orientation::Horizontal);
+            let (left_widget, right_widget) = paned_children(&paned);
+            assert_widget_clickable(&left_widget);
+            assert_widget_clickable(&right_widget);
+            assert_all_terminals_visible(&state, window_id);
+            assert_paned_min_child_sizes(&paned, 10);
+
+            state.cycle_tab(window_id, false);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().id, existing_tabs[0]);
+        });
+    }
+
+    #[test]
+    fn gui_inner_tabs_inside_nested_splits() {
+        run_gui_test("inner_tabs_nested", |state, window_id| {
+            pump_events();
+
+            let first = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let right = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Vertical);
+            pump_events();
+
+            let bottom_right = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal_no_rebuild(window_id, tab_id, bottom_right);
+            }
+            pump_events();
+
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            if let Some(tab_id) = state.current_tab_id(window_id) {
+                state.set_active_terminal(window_id, tab_id, bottom_right);
+            }
+            pump_events();
+
+            state.new_inner_tab(window_id);
+            pump_events();
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            let tab = window.active_tab();
+            match &tab.root {
+                LayoutNode::Split(split) => {
+                    let right_branch = match &split.children[1] {
+                        LayoutNode::Split(nested) => nested,
+                        other => panic!("expected nested split, got {:?}", other),
+                    };
+                    match &right_branch.children[right_branch.children.len() - 1] {
+                        LayoutNode::Tabs(group) => {
+                            assert_eq!(group.tabs.len(), 2, "expected two inner tabs");
+                            let focuses: Vec<TerminalId> =
+                                group.tabs.iter().map(|t| t.focus).collect();
+                            assert!(focuses.contains(&bottom_right));
+                            assert!(focuses.iter().any(|&id| id != bottom_right));
+                        }
+                        other => panic!("expected tabs node, got {:?}", other),
+                    }
+                }
+                other => panic!("expected split root, got {:?}", other),
+            }
+
+            let mut ids = Vec::new();
+            tab.collect_terminal_ids(&mut ids);
+            assert!(ids.contains(&first));
+            assert!(ids.contains(&right));
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top_paned = page.clone().downcast::<Paned>().expect("top paned");
+            assert_eq!(top_paned.orientation(), Orientation::Horizontal);
+            let (_, right_widget) = paned_children(&top_paned);
+            let nested = right_widget.downcast::<Paned>().expect("nested paned");
+            assert_paned_min_child_sizes(&nested, 10);
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top_paned = page.clone().downcast::<Paned>().expect("top paned");
+            assert_eq!(top_paned.orientation(), Orientation::Horizontal);
+            let (left_widget, right_widget) = paned_children(&top_paned);
+            assert_widget_clickable(&left_widget);
+            assert_widget_clickable(&right_widget);
+            let nested_paned = right_widget.downcast::<Paned>().expect("nested paned");
+            assert_eq!(nested_paned.orientation(), Orientation::Horizontal);
+            let (_, right_end) = paned_children(&nested_paned);
+            let inner_notebook = right_end.downcast::<Notebook>().expect("inner notebook");
+            assert_eq!(inner_notebook.n_pages(), 2);
+            for i in 0..inner_notebook.n_pages() {
+                let page = inner_notebook.nth_page(Some(i)).expect("inner page");
+                assert_widget_clickable(&page);
+            }
+        });
+    }
+
+    #[test]
+    fn gui_double_horizontal_split_creates_three_panes() {
+        run_gui_test("double_split", |state, window_id| {
+            pump_events();
+
+            let first = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let second = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+            assert_ne!(first, second);
+
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let third = {
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                window.active_tab().active_terminal()
+            };
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            let tab = window.active_tab();
+            match &tab.root {
+                LayoutNode::Split(split) => {
+                    assert_eq!(split.children.len(), 2);
+                    if let LayoutNode::Split(inner) = &split.children[1] {
+                        assert_eq!(inner.children.len(), 2);
+                    } else {
+                        panic!("expected nested split after second split");
+                    }
+                }
+                other => panic!("expected split root, got {:?}", other),
+            }
+
+            let mut ids = Vec::new();
+            tab.collect_terminal_ids(&mut ids);
+            assert!(ids.contains(&first));
+            assert!(ids.contains(&second));
+            assert!(ids.contains(&third));
+            assert_eq!(ids.len(), 3);
+
+            let controller = controller_for(&state, window_id);
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let top_paned = page.downcast::<Paned>().expect("top paned");
+            assert_eq!(top_paned.orientation(), Orientation::Horizontal);
+            let (left_widget, right_widget) = paned_children(&top_paned);
+            assert_widget_clickable(&left_widget);
+            assert_widget_clickable(&right_widget);
+            let nested = right_widget.downcast::<Paned>().expect("inner paned");
+            assert_eq!(nested.orientation(), Orientation::Horizontal);
+            let (mid_widget, end_widget) = paned_children(&nested);
+            assert_widget_clickable(&mid_widget);
+            assert_widget_clickable(&end_widget);
+
+            // Verify tree shape string for quick pattern match
+            let page_for_tree = active_page_widget(&controller);
+            let tree = build_view_tree(&page_for_tree);
+            let shape = view_to_string(&tree);
+            assert!(
+                shape.starts_with("H(Term, H("),
+                "unexpected tree shape: {}",
+                shape
+            );
+        });
+    }
+
+    #[test]
+    fn gui_new_tab_then_split_creates_single_new_tab_only() {
+        run_gui_test("tab_split_no_loop", |state, window_id| {
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            assert_eq!(controller.notebook.n_pages(), 1);
+
+            state.new_tab(window_id);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            assert_eq!(controller.notebook.n_pages(), 2);
+
+            let tab_id = state.current_tab_id(window_id).expect("tab id");
+            state.split_active(window_id, SplitOrientation::Horizontal);
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            assert_eq!(controller.notebook.n_pages(), 2, "no extra tabs created");
+
+            let page = active_page_widget(&controller);
+            assert_widget_ready(&page);
+            let paned = page.downcast::<Paned>().expect("paned");
+            assert_eq!(paned.orientation(), Orientation::Horizontal);
+            let (left_widget, right_widget) = paned_children(&paned);
+            assert_widget_clickable(&left_widget);
+            assert_widget_clickable(&right_widget);
+
+            let ws = state.workspace.borrow();
+            let window = ws
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .expect("window exists");
+            assert_eq!(window.active_tab().id, tab_id);
+            drop(ws);
+
+            // Stability: run several event cycles and assert tabs remain exactly two
+            for _ in 0..50 {
+                pump_events();
+                let controller = controller_for(&state, window_id);
+                assert_eq!(
+                    controller.notebook.n_pages(),
+                    2,
+                    "tab count must remain stable"
+                );
+                let ws = state.workspace.borrow();
+                let window = ws
+                    .windows
+                    .iter()
+                    .find(|w| w.id == window_id)
+                    .expect("window exists");
+                // Assert workspace mirrors controller page count and IDs stay identical
+                assert_eq!(window.tabs.len(), 2, "workspace must have exactly two tabs");
+                // Validate IDs haven't changed
+                let ids: Vec<TabId> = window.tabs.iter().map(|t| t.id).collect();
+                assert_eq!(ids.len(), 2);
+            }
         });
     }
 }

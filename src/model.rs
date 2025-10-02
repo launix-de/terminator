@@ -34,9 +34,23 @@ pub enum ActionId {
     Close,
     CloseInnerTab,
     Settings,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    NextTab,
+    PrevTab,
 }
 
 pub type KeybindingMap = HashMap<ActionId, Vec<String>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceModel {
@@ -172,6 +186,25 @@ impl WorkspaceModel {
         false
     }
 
+    pub fn focus_neighbor(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+        terminal_id: TerminalId,
+        direction: FocusDirection,
+    ) -> Option<TerminalId> {
+        let window = self.windows.iter().find(|w| w.id == window_id)?;
+        let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
+        let (orientation, forward) = match direction {
+            FocusDirection::Left => (SplitOrientation::Horizontal, false),
+            FocusDirection::Right => (SplitOrientation::Horizontal, true),
+            FocusDirection::Up => (SplitOrientation::Vertical, false),
+            FocusDirection::Down => (SplitOrientation::Vertical, true),
+        };
+        tab.root
+            .find_adjacent_terminal(terminal_id, orientation, forward)
+    }
+
     pub fn split_terminal(
         &mut self,
         window_id: WindowId,
@@ -269,32 +302,50 @@ impl WorkspaceModel {
         &mut self,
         window_id: WindowId,
         tab_id: TabId,
-        _from_terminal: TerminalId,
+        from_terminal: TerminalId,
     ) -> Option<(InnerTabId, TerminalId)> {
         let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
         let tab = window.tabs.iter_mut().find(|t| t.id == tab_id)?;
-        tab.ensure_tabs_group();
-        let group = match &mut tab.root {
-            LayoutNode::Tabs(group) => group,
-            _ => unreachable!(),
-        };
 
         let new_terminal_id = TerminalId(Uuid::new_v4());
         let inner_id = InnerTabId(Uuid::new_v4());
-        let new_inner = InnerTab {
-            id: inner_id,
-            title: String::from("Terminal"),
-            root: LayoutNode::Terminal(TerminalLeaf {
-                node_id: NodeId(Uuid::new_v4()),
-                terminal_id: new_terminal_id,
+
+        // 1) If there's already a Tabs group containing the target terminal, append to it
+        if tab
+            .root
+            .add_inner_to_group_containing(from_terminal, inner_id, new_terminal_id)
+        {
+            tab.focus = new_terminal_id;
+            return Some((inner_id, new_terminal_id));
+        }
+
+        // 2) Otherwise, wrap just the subtree that contains the target into a Tabs group
+        if tab
+            .root
+            .wrap_subtree_with_tabs_at(from_terminal, inner_id, new_terminal_id)
+        {
+            tab.focus = new_terminal_id;
+            return Some((inner_id, new_terminal_id));
+        }
+
+        // 3) Fallback: wrap the whole tab at top-level (legacy behavior)
+        tab.ensure_tabs_group();
+        if let LayoutNode::Tabs(group) = &mut tab.root {
+            let new_inner = InnerTab {
+                id: inner_id,
                 title: String::from("Terminal"),
-                title_flexible: true,
-            }),
-            focus: new_terminal_id,
-            flexible: true,
-        };
-        group.tabs.push(new_inner);
-        group.active = group.tabs.len() - 1;
+                root: LayoutNode::Terminal(TerminalLeaf {
+                    node_id: NodeId(Uuid::new_v4()),
+                    terminal_id: new_terminal_id,
+                    title: String::from("Terminal"),
+                    title_flexible: true,
+                }),
+                focus: new_terminal_id,
+                flexible: true,
+            };
+            group.tabs.push(new_inner);
+            group.active = group.tabs.len() - 1;
+        }
         tab.focus = new_terminal_id;
         Some((inner_id, new_terminal_id))
     }
@@ -514,11 +565,200 @@ impl LayoutNode {
         }
     }
 
+    fn last_terminal_id(&self) -> Option<TerminalId> {
+        match self {
+            LayoutNode::Terminal(leaf) => Some(leaf.terminal_id),
+            LayoutNode::Split(split) => split
+                .children
+                .iter()
+                .rev()
+                .find_map(|child| child.last_terminal_id()),
+            LayoutNode::Tabs(group) => group
+                .tabs
+                .get(group.active)
+                .and_then(|inner| inner.root.last_terminal_id()),
+        }
+    }
+
     fn contains_terminal(&self, id: TerminalId) -> bool {
         match self {
             LayoutNode::Terminal(leaf) => leaf.terminal_id == id,
             LayoutNode::Split(split) => split.children.iter().any(|c| c.contains_terminal(id)),
             LayoutNode::Tabs(group) => group.tabs.iter().any(|i| i.root.contains_terminal(id)),
+        }
+    }
+
+    // If there is a Tabs group that contains the target terminal, append a new inner tab to that group.
+    // Returns true if a group was found and modified.
+    fn add_inner_to_group_containing(
+        &mut self,
+        target: TerminalId,
+        new_inner_id: InnerTabId,
+        new_terminal_id: TerminalId,
+    ) -> bool {
+        match self {
+            LayoutNode::Tabs(group) => {
+                // Find the inner whose root contains target
+                if group.tabs.iter().any(|i| i.root.contains_terminal(target)) {
+                    let new_inner = InnerTab {
+                        id: new_inner_id,
+                        title: String::from("Terminal"),
+                        root: LayoutNode::Terminal(TerminalLeaf {
+                            node_id: NodeId(Uuid::new_v4()),
+                            terminal_id: new_terminal_id,
+                            title: String::from("Terminal"),
+                            title_flexible: true,
+                        }),
+                        focus: new_terminal_id,
+                        flexible: true,
+                    };
+                    group.tabs.push(new_inner);
+                    group.active = group.tabs.len() - 1;
+                    true
+                } else {
+                    // Recurse into inners
+                    for inner in &mut group.tabs {
+                        if inner
+                            .root
+                            .add_inner_to_group_containing(target, new_inner_id, new_terminal_id)
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.add_inner_to_group_containing(target, new_inner_id, new_terminal_id) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Terminal(_) => false,
+        }
+    }
+
+    // Wrap the subtree that contains `target` into a Tabs group holding the existing subtree
+    // and a new inner tab with `new_terminal_id`.
+    // Returns true if a subtree was found and wrapped.
+    fn wrap_subtree_with_tabs_at(
+        &mut self,
+        target: TerminalId,
+        new_inner_id: InnerTabId,
+        new_terminal_id: TerminalId,
+    ) -> bool {
+        match self {
+            LayoutNode::Terminal(leaf) => {
+                if leaf.terminal_id == target {
+                    let orig_term = leaf.terminal_id;
+                    let existing = std::mem::replace(
+                        self,
+                        LayoutNode::Tabs(TabGroup {
+                            node_id: NodeId(Uuid::new_v4()),
+                            tabs: Vec::new(),
+                            active: 0,
+                        }),
+                    );
+                    if let LayoutNode::Tabs(group) = self {
+                        // First inner: existing subtree
+                        let first_terminal = existing.first_terminal_id().unwrap_or(orig_term);
+                        let first_inner = InnerTab {
+                            id: InnerTabId(Uuid::new_v4()),
+                            title: String::from("Terminal"),
+                            root: existing,
+                            focus: first_terminal,
+                            flexible: true,
+                        };
+                        // Second inner: the new terminal
+                        let second_inner = InnerTab {
+                            id: new_inner_id,
+                            title: String::from("Terminal"),
+                            root: LayoutNode::Terminal(TerminalLeaf {
+                                node_id: NodeId(Uuid::new_v4()),
+                                terminal_id: new_terminal_id,
+                                title: String::from("Terminal"),
+                                title_flexible: true,
+                            }),
+                            focus: new_terminal_id,
+                            flexible: true,
+                        };
+                        group.tabs.push(first_inner);
+                        group.tabs.push(second_inner);
+                        group.active = 1;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Tabs(group) => {
+                // Find the inner containing the target and wrap inside it
+                for inner in &mut group.tabs {
+                    if inner.root.contains_terminal(target) {
+                        if inner
+                            .root
+                            .wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id)
+                        {
+                            // Keep the active as-is or set to the inner that was modified
+                            // so UI reflects the change. Move focus inside parent Tabs handled by caller.
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn find_adjacent_terminal(
+        &self,
+        target: TerminalId,
+        orientation: SplitOrientation,
+        forward: bool,
+    ) -> Option<TerminalId> {
+        match self {
+            LayoutNode::Terminal(_) => None,
+            LayoutNode::Split(split) => {
+                for (index, child) in split.children.iter().enumerate() {
+                    if child.contains_terminal(target) {
+                        if split.orientation == orientation {
+                            if forward {
+                                if let Some(next_child) = split.children.get(index + 1) {
+                                    return next_child.first_terminal_id();
+                                }
+                            } else if index > 0 {
+                                if let Some(prev_child) = split.children.get(index - 1) {
+                                    return prev_child.last_terminal_id();
+                                }
+                            }
+                        }
+                        return child.find_adjacent_terminal(target, orientation, forward);
+                    }
+                }
+                None
+            }
+            LayoutNode::Tabs(group) => {
+                for inner in &group.tabs {
+                    if inner.root.contains_terminal(target) {
+                        return inner
+                            .root
+                            .find_adjacent_terminal(target, orientation, forward);
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -675,6 +915,12 @@ fn default_keybindings() -> KeybindingMap {
     map.insert(Settings, vec!["<Ctrl><Shift>,".into()]);
     map.insert(Close, vec!["<Ctrl><Shift>W".into()]);
     map.insert(CloseInnerTab, vec!["<Ctrl><Shift>D".into()]);
+    map.insert(FocusLeft, vec!["<Alt>Left".into()]);
+    map.insert(FocusRight, vec!["<Alt>Right".into()]);
+    map.insert(FocusUp, vec!["<Alt>Up".into()]);
+    map.insert(FocusDown, vec!["<Alt>Down".into()]);
+    map.insert(NextTab, vec!["<Ctrl>Page_Down".into()]);
+    map.insert(PrevTab, vec!["<Ctrl>Page_Up".into()]);
     map
 }
 
@@ -795,6 +1041,86 @@ mod tests {
             .get(&ActionId::SplitVertical)
             .expect("vertical binding exists");
         assert_eq!(vert, &["<Ctrl><Shift>O".to_string()]);
+
+        let next = map
+            .get(&ActionId::NextTab)
+            .expect("next tab binding exists");
+        assert_eq!(next, &["<Ctrl>Page_Down".to_string()]);
+
+        let prev = map
+            .get(&ActionId::PrevTab)
+            .expect("prev tab binding exists");
+        assert_eq!(prev, &["<Ctrl>Page_Up".to_string()]);
+    }
+
+    #[test]
+    fn focus_neighbor_across_splits() {
+        let (mut ws, window_id, tab_id, first) = setup_workspace();
+        let right = ws
+            .split_terminal(window_id, first, SplitOrientation::Horizontal)
+            .expect("horizontal split");
+
+        assert_eq!(
+            ws.focus_neighbor(window_id, tab_id, first, FocusDirection::Right),
+            Some(right)
+        );
+        assert_eq!(
+            ws.focus_neighbor(window_id, tab_id, right, FocusDirection::Left),
+            Some(first)
+        );
+
+        let bottom = ws
+            .split_terminal(window_id, right, SplitOrientation::Vertical)
+            .expect("vertical split");
+
+        assert_eq!(
+            ws.focus_neighbor(window_id, tab_id, right, FocusDirection::Down),
+            Some(bottom)
+        );
+        assert_eq!(
+            ws.focus_neighbor(window_id, tab_id, bottom, FocusDirection::Up),
+            Some(right)
+        );
+    }
+
+    #[test]
+    fn inner_tab_should_be_nested_in_lower_right_after_o_e_u() {
+        // Sequence: Ctrl+Shift+O (vertical split), Ctrl+Shift+E (horizontal split on focused), Ctrl+Shift+U (new inner tab)
+        let (mut ws, window_id, tab_id, first) = setup_workspace();
+
+        // Split vertically: create right (or bottom) sibling; per implementation, new terminal becomes the second child
+        let right_or_bottom = ws
+            .split_terminal(window_id, first, SplitOrientation::Vertical)
+            .expect("vertical split created");
+
+        // Split horizontally on the newly created terminal to form a bottom-right quadrant
+        let bottom_right = ws
+            .split_terminal(window_id, right_or_bottom, SplitOrientation::Horizontal)
+            .expect("horizontal split on new child");
+
+        // Add inner tab at the currently focused terminal (should be bottom_right)
+        let maybe = ws.add_inner_tab(window_id, tab_id, bottom_right);
+        assert!(maybe.is_some());
+
+        // Validate that the tabs node appears nested within the bottom-right branch, not at the top-level
+        let root = &ws.windows[0].tabs[0].root;
+        match root {
+            LayoutNode::Split(outer) => {
+                // Expect the second child branch to contain a split with a tabs node at its last child
+                match &outer.children[outer.children.len() - 1] {
+                    LayoutNode::Split(inner) => {
+                        match &inner.children[inner.children.len() - 1] {
+                            LayoutNode::Tabs(group) => {
+                                assert!(group.tabs.len() >= 2, "expected at least two inner tabs");
+                            }
+                            other => panic!("expected nested tabs at bottom-right, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected nested split as right/bottom branch, got {:?}", other),
+                }
+            }
+            other => panic!("expected outer split as root, got {:?}", other),
+        }
     }
 }
 
