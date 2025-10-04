@@ -207,6 +207,23 @@ impl AppState {
             .any(|w| w.id == window_id)
         {
             self.rebuild_window(window_id);
+            // After closing a terminal, ensure focus remains on a terminal widget so
+            // terminal key input (e.g., Ctrl+D) continues to work across tabs.
+            let weak = Rc::downgrade(self);
+            glib::idle_add_local(move || {
+                if let Some(state) = weak.upgrade() {
+                    if let Some(tab_id) = state.current_tab_id(window_id) {
+                        if let Some(term_id) = state
+                            .workspace
+                            .borrow()
+                            .first_terminal_in_tab(window_id, tab_id)
+                        {
+                            state.focus_and_remember(window_id, tab_id, term_id);
+                        }
+                    }
+                }
+                glib::ControlFlow::Break
+            });
         } else {
             let controller = {
                 let mut controllers = self.controllers.borrow_mut();
@@ -3424,6 +3441,47 @@ mod gui_tests {
             // The label holds dynamic text like "Terminator — <tab>" or terminal path; but must not contain MyProj
             assert!(!txt.contains("MyProj"), "clearing must not retain previous custom title in dynamic label");
             assert!(txt.contains("Terminator") || !txt.contains("—"), "should include default window title or a pure terminal title");
+        });
+    }
+
+    #[test]
+    fn gui_eof_close_keeps_focus_on_terminal_across_tabs() {
+        run_gui_test("eof_focus_kept", |state, window_id| {
+            pump_events();
+
+            // Open several tabs
+            for _ in 0..4 {
+                state.new_tab(window_id);
+                pump_events();
+            }
+
+            // Iteratively close the active terminal (simulate EOF) and ensure focus returns to a terminal
+            for _ in 0..4 {
+                // Capture current active terminal
+                let (_tab_id, term_id) = {
+                    let ws = state.workspace.borrow();
+                    let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                    (window.active_tab().id, window.active_tab().active_terminal())
+                };
+
+                // Simulate child exit -> close terminal
+                state.handle_terminal_exit(term_id);
+                pump_events();
+
+                // Verify focus is on a terminal widget (not the tab label)
+                let controller = controller_for(&state, window_id);
+                let term = controller.active_terminal(&state).expect("terminal widget");
+                assert!(term.has_focus(), "terminal should have focus after closing previous one");
+
+                // Also ensure last_focus is updated to a terminal in current tab
+                let last = state
+                    .last_focus
+                    .borrow()
+                    .get(&window_id)
+                    .copied()
+                    .expect("last focus recorded");
+                assert_eq!(last.0, controller.current_tab_id().expect("current tab id"));
+            }
         });
     }
 
