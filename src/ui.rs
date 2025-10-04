@@ -21,7 +21,7 @@ impl EditableTitleBar {
         container.add_css_class("custom-title");
         container.set_margin_top(2);
         container.set_margin_bottom(2);
-        container.set_margin_start(6);
+        container.set_margin_start(0);
         container.set_margin_end(6);
         container.set_hexpand(true);
 
@@ -66,6 +66,10 @@ impl EditableTitleBar {
 
     pub fn widget(&self) -> Box {
         self.inner.container.clone()
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.inner.is_custom.get()
     }
 
     pub fn update_dynamic(&self, title: Option<&str>) {
@@ -128,6 +132,20 @@ struct EditableTitleBarInner {
 
 impl EditableTitleBarInner {
     fn setup_interactions(self: &Rc<Self>) {
+        // Capture-phase gesture to claim double-clicks before window manager/headerbar actions
+        let cap_click = GestureClick::new();
+        cap_click.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+        cap_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let this_cap = Rc::clone(self);
+        cap_click.connect_pressed(move |g, n_press, _, _| {
+            if n_press == 2 {
+                g.set_state(EventSequenceState::Claimed);
+                this_cap.begin_edit();
+            }
+        });
+        self.container.add_controller(cap_click);
+
+        // Bubble-phase as fallback (kept for completeness and tests)
         let gesture = GestureClick::new();
         gesture.set_button(gdk::ffi::GDK_BUTTON_PRIMARY as u32);
         gesture.set_propagation_phase(gtk4::PropagationPhase::Bubble);

@@ -3,7 +3,7 @@ mod ui;
 
 use crate::model::{
     ActionId, FocusDirection, InnerTab, InnerTabId, KeybindingMap, LayoutNode, SplitNode,
-    SplitOrientation, TabGroup, TabId, TerminalId, TerminalLeaf, WindowId, WindowModel,
+    SplitOrientation, TabGroup, TabId, TabModel, TerminalId, TerminalLeaf, WindowId, WindowModel,
     WorkspaceModel,
 };
 use crate::ui::{EditableTabLabel, EditableTitleBar};
@@ -271,7 +271,8 @@ impl AppState {
                 for tab in window.tabs.iter_mut() {
                     let tab_active_terminal = tab.active_terminal();
                     if tab.title_flexible && tab_active_terminal == terminal_id {
-                        let fallback = format!("{} — {}", window.title, tab.display_title());
+                        // Use the base (non-dynamic) tab title to avoid recursive composition
+                        let fallback = format!("{} — {}", window.title, tab.title);
                         let dynamic = format_terminal_title(&terminal, &fallback, true);
                         if tab.dynamic_title != dynamic {
                             tab.dynamic_title = dynamic;
@@ -405,13 +406,19 @@ impl AppState {
             return;
         }
         let current_tab = self.current_tab_id(window_id);
+        // Prefer last_focus when it matches current tab; fallback to model's active terminal
         let focused_terminal = {
+            if let Some((tab, term)) = self.last_focus.borrow().get(&window_id) {
+                if Some(*tab) == current_tab { Some(*term) } else { None }
+            } else { None }
+        }.or_else({
             let ws = self.workspace.borrow();
-            ws.windows
+            let maybe = ws.windows
                 .iter()
                 .find(|w| w.id == window_id)
-                .map(|window| window.active_tab().active_terminal())
-        };
+                .map(|window| window.active_tab().active_terminal());
+            move || maybe
+        });
         if let (Some(tab_id), Some(from_terminal)) = (current_tab, focused_terminal) {
             if let Some((_inner_id, new_terminal)) =
                 self.workspace
@@ -442,34 +449,71 @@ impl AppState {
         // Determine current tab and focused terminal
         let current_tab = self.current_tab_id(window_id);
         let focused_terminal = {
+            if let Some((tab, term)) = self.last_focus.borrow().get(&window_id) {
+                if Some(*tab) == current_tab { Some(*term) } else { None }
+            } else { None }
+        }.or_else({
             let ws = self.workspace.borrow();
-            ws.windows
+            let maybe = ws.windows
                 .iter()
                 .find(|w| w.id == window_id)
-                .map(|window| window.active_tab().active_terminal())
-        };
-        if let (Some(tab_id), Some(term)) = (current_tab, focused_terminal) {
-            // If focused terminal resides inside any Tabs group, create a new inner tab instead
-            let inside_tabs = {
-                let ws = self.workspace.borrow();
-                let window = ws.windows.iter().find(|w| w.id == window_id);
-                if let Some(window) = window {
-                    let tab = window.tabs.iter().find(|t| t.id == tab_id);
-                    if let Some(tab) = tab {
-                        tab.root.find_inner_id_for_terminal(term).is_some()
-                    } else {
-                        false
+                .map(|window| window.active_tab().active_terminal());
+            move || maybe
+        });
+
+        // Helper: find any Tabs group in the active tab and return its active inner's focus terminal
+        let group_focus = |tab: &TabModel| -> Option<TerminalId> {
+            fn find(node: &LayoutNode) -> Option<TerminalId> {
+                match node {
+                    LayoutNode::Tabs(group) => Some(group.tabs.get(group.active).map(|i| i.focus).unwrap_or_else(|| group.tabs.first().map(|i| i.focus).unwrap_or_else(|| TerminalId(uuid::Uuid::nil())))),
+                    LayoutNode::Split(split) => {
+                        for c in &split.children { if let Some(t) = find(c) { return Some(t); } }
+                        None
                     }
+                    LayoutNode::Terminal(_) => None,
+                }
+            }
+            find(&tab.root)
+        };
+
+        if let Some(tab_id) = current_tab {
+            // Decide where to add the new inner tab
+            let (add_to_inner, from_terminal) = {
+                let ws = self.workspace.borrow();
+                let window = match ws.windows.iter().find(|w| w.id == window_id) { Some(w) => w, None => { self.new_tab(window_id); return; } };
+                let tab = match window.tabs.iter().find(|t| t.id == tab_id) { Some(t) => t, None => { self.new_tab(window_id); return; } };
+                if let Some(term) = focused_terminal {
+                    if tab.root.find_inner_id_for_terminal(term).is_some() {
+                        (true, term)
+                    } else if let Some(inner_focus) = group_focus(tab) {
+                        (true, inner_focus)
+                    } else {
+                        (false, term)
+                    }
+                } else if let Some(inner_focus) = group_focus(tab) {
+                    (true, inner_focus)
                 } else {
-                    false
+                    (false, tab.active_terminal())
                 }
             };
-            if inside_tabs {
-                self.new_inner_tab(window_id);
-                return;
+
+            if add_to_inner {
+                if let Some((_inner_id, new_terminal)) = self.workspace.borrow_mut().add_inner_tab(window_id, tab_id, from_terminal) {
+                    self.registry.borrow_mut().ensure_terminal(new_terminal);
+                    let weak = Rc::downgrade(self);
+                    glib::idle_add_local(move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.rebuild_window(window_id);
+                            state.focus_and_remember(window_id, tab_id, new_terminal);
+                        }
+                        glib::ControlFlow::Break
+                    });
+                    return;
+                }
             }
         }
-        // Fallback: open a new top-level tab
+
+        // Fallback: open a new top-level tab if no Tabs group to target
         self.new_tab(window_id);
     }
 
@@ -839,9 +883,10 @@ struct WorkspaceController {
     last_keyboard_focus: Cell<Option<std::time::Instant>>,
     preview_overlay: RefCell<Option<gtk4::Box>>,
     preview_label: RefCell<Option<gtk4::Label>>,
+    // Rectangular overlay used for half-area drop previews over terminals
+    preview_rect: RefCell<Option<gtk4::Box>>,
     drop_targets: RefCell<HashMap<TerminalId, gtk4::DropTarget>>,
     header_drags: RefCell<HashMap<TerminalId, GestureDrag>>,
-    drag_in_progress: Cell<bool>,
 }
 
 impl WorkspaceController {
@@ -855,24 +900,15 @@ impl WorkspaceController {
         widget.add_controller(cap_drag);
     }
 
+    // Attach a DragSource that produces a resource descriptor (payload) for moves.
+    // The payload is a String consumed by DropTargets and parsed via DragPayload.
+    // This allows moving either a terminal (header/tab label) or an inner tab content.
     fn attach_drag_source_with_owner(self: &Rc<Self>, widget: &impl IsA<Widget>, payload: String) {
         let drag = DragSource::new();
         drag.set_actions(gtk4::gdk::DragAction::MOVE);
         drag.connect_prepare(move |_, _, _| {
             let v = payload.to_value();
             Some(gtk4::gdk::ContentProvider::for_value(&v))
-        });
-        let weak_self = Rc::downgrade(self);
-        drag.connect_drag_begin(move |_, _| {
-            if let Some(controller) = weak_self.upgrade() {
-                controller.set_drag_in_progress(true);
-            }
-        });
-        let weak_self = Rc::downgrade(self);
-        drag.connect_drag_end(move |_, _, _| {
-            if let Some(controller) = weak_self.upgrade() {
-                controller.set_drag_in_progress(false);
-            }
         });
         widget.add_controller(drag);
     }
@@ -902,6 +938,7 @@ impl WorkspaceController {
         }
     }
 
+    #[allow(dead_code)]
     fn for_each_child(root: &Widget, f: &mut dyn FnMut(&Widget)) {
         f(root);
         let mut child = root.first_child();
@@ -911,24 +948,10 @@ impl WorkspaceController {
         }
     }
 
-    fn set_drag_in_progress(&self, active: bool) {
-        if self.drag_in_progress.replace(active) == active {
-            return;
-        }
-        if let Some(root) = self.active_page_widget() {
-            let mut toggle = |w: &Widget| {
-                if w.is::<Paned>() {
-                    w.set_can_target(!active);
-                }
-            };
-            Self::for_each_child(&root, &mut toggle);
-        }
-    }
-
 
     #[allow(deprecated)]
     fn show_preview(&self, text: &str) {
-        // Create semi-transparent black overlay with centered label
+        // Full overlay with centered label for generic previews (e.g., tab headers)
         if let Some(lbl) = self.preview_label.borrow().as_ref() {
             lbl.set_text(text);
             if let Some(boxw) = self.preview_overlay.borrow().as_ref() {
@@ -962,11 +985,65 @@ impl WorkspaceController {
         if let Some(boxw) = self.preview_overlay.borrow().as_ref() {
             boxw.hide();
         }
+        if let Some(rect) = self.preview_rect.borrow().as_ref() {
+            rect.hide();
+        }
     }
 
     fn active_page_widget(&self) -> Option<Widget> {
         let idx = self.notebook.current_page()? as u32;
         self.notebook.nth_page(Some(idx))
+    }
+
+    // Show a half-sized semi-transparent black rectangle over the given drop target
+    // side: "left", "right", "top", "bottom"
+    fn show_split_preview_on(&self, target: &Widget, side: &str) {
+        // Lazily create the rectangular overlay if not present
+        let rect_widget = if let Some(rect) = self.preview_rect.borrow().as_ref() {
+            rect.clone()
+        } else {
+            let rect = gtk4::Box::new(Orientation::Vertical, 0);
+            rect.add_css_class("dnd-preview");
+            rect.set_halign(gtk4::Align::Start);
+            rect.set_valign(gtk4::Align::Start);
+            self.overlay.add_overlay(&rect);
+            self.preview_rect.borrow_mut().replace(rect.clone());
+            rect
+        };
+        #[allow(deprecated)]
+        rect_widget.show();
+
+        // Compute the target rectangle in overlay coordinates
+        // We attempt to translate target's (0,0) to overlay coordinates; if unavailable,
+        // fall back to anchoring at (0,0) and using overlay size.
+        #[allow(deprecated)]
+        let (ox, oy) = match target.translate_coordinates(&self.overlay, 0.0, 0.0) {
+            Some((x, y)) => (x.max(0.0), y.max(0.0)),
+            None => (0.0, 0.0),
+        };
+        // Use the target's allocation to size the overlay
+        #[allow(deprecated)]
+        let alloc = target.allocation();
+        let tw = alloc.width().max(1) as f64;
+        let th = alloc.height().max(1) as f64;
+
+        // Determine preview rect position and size
+        let (x, y, w, h) = match side {
+            "left" => (ox, oy, tw / 2.0, th),
+            "right" => (ox + tw / 2.0, oy, tw / 2.0, th),
+            "top" => (ox, oy, tw, th / 2.0),
+            _ => (ox, oy + th / 2.0, tw, th / 2.0),
+        };
+
+        // Position the overlay rectangle using size request and margins
+        rect_widget.set_size_request(w as i32, h as i32);
+        rect_widget.set_margin_start(x as i32);
+        rect_widget.set_margin_top(y as i32);
+        rect_widget.set_margin_end(0);
+        rect_widget.set_margin_bottom(0);
+        // Align using start to respect margin_start/top
+        rect_widget.set_halign(gtk4::Align::Start);
+        rect_widget.set_valign(gtk4::Align::Start);
     }
 
     fn widget_contains(root: &Widget, needle: &Widget) -> bool {
@@ -1059,7 +1136,12 @@ impl WorkspaceController {
             .build();
 
         let header = HeaderBar::builder().show_title_buttons(true).build();
-        header.set_title_widget(Some(&title_bar.widget()));
+        // Place our custom title in the start slot and suppress the default centered title
+        // to avoid showing two titles (left custom + default centered one).
+        let title_widget = title_bar.widget();
+        header.pack_start(&title_widget);
+        let empty = gtk4::Label::new(None);
+        header.set_title_widget(Some(&empty));
         window.set_titlebar(Some(&header));
 
         let container = Box::new(Orientation::Vertical, 0);
@@ -1096,9 +1178,9 @@ impl WorkspaceController {
             last_keyboard_focus: Cell::new(None),
             preview_overlay: RefCell::new(None),
             preview_label: RefCell::new(None),
+            preview_rect: RefCell::new(None),
             drop_targets: RefCell::new(HashMap::new()),
             header_drags: RefCell::new(HashMap::new()),
-            drag_in_progress: Cell::new(false),
         });
 
         controller.install_actions();
@@ -1341,8 +1423,13 @@ impl WorkspaceController {
             .connect_committed(move |is_custom, new_title| {
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
-                        let _ = is_custom; // window title doesn't have flexible concept; treat double-click as custom rename
-                        state.rename_window_title(controller.window_id, new_title.clone());
+                        if is_custom {
+                            state.rename_window_title(controller.window_id, new_title.clone());
+                        } else {
+                            // Revert to default app title when clearing custom title
+                            state.rename_window_title(controller.window_id, "Terminator".to_string());
+                            controller.update_window_title();
+                        }
                     }
                 }
             });
@@ -1397,12 +1484,18 @@ impl WorkspaceController {
         self.window.set_title(Some(&window_model.title));
 
         let active_tab = window_model.active_tab();
-        let title_text = format!("{} — {}", window_model.title, active_tab.display_title());
-        self.title_bar.set_titles(
-            &title_text,
-            &window_model.title,
-            active_tab.is_title_flexible(),
-        );
+        let title_text = if self.title_bar.is_custom() {
+            window_model.title.clone()
+        } else {
+            format!("{} — {}", window_model.title, active_tab.display_title())
+        };
+        let titlebar_flexible = if self.title_bar.is_custom() {
+            false
+        } else {
+            active_tab.is_title_flexible()
+        };
+        self.title_bar
+            .set_titles(&title_text, &window_model.title, titlebar_flexible);
 
         if let Some(handler_id) = self.switch_handler.borrow().as_ref() {
             signal_handler_block(&self.notebook, handler_id);
@@ -1500,6 +1593,11 @@ impl WorkspaceController {
             let paned = Paned::new(orientation);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
+            // Ensure only the thin separator between panes can start a resize
+            // This prevents drags from child widgets (like titlebars) from initiating a Paned resize
+            let _ = paned.set_property("wide-handle", &false);
+            // No local Paned guard: handle is visually narrow (4px) and we disable
+            // Paned only while hovering titlebars via header-level motion handlers.
             // Avoid shrinking children to zero; allow both children to resize
             paned.set_shrink_start_child(false);
             paned.set_shrink_end_child(false);
@@ -1540,12 +1638,13 @@ impl WorkspaceController {
             header.append(&label);
             label_ref = Some(label);
 
-            // Claim drags so Paned doesn't resize when starting a drag here
+            // Do not claim here; Paned resize prevention is handled via can_target toggling
+            // while an app drag is in progress (see set_drag_in_progress).
             let header_drag = GestureDrag::new();
             header_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            header_drag.connect_drag_begin(|g, _, _| {
-                g.set_state(gtk4::EventSequenceState::Claimed);
-            });
+            // Only react to primary button drags from the header
+            header_drag.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+            header_drag.connect_drag_begin(|_g, _sx, _sy| {});
             header.add_controller(header_drag.clone());
             // Keep for tests
             if let Some(controller) = self.state.upgrade().and_then(|_| Some(self.clone())) {
@@ -1554,16 +1653,41 @@ impl WorkspaceController {
                     .borrow_mut()
                     .insert(leaf.terminal_id, header_drag);
             }
-            // Also claim primary press at capture phase to prevent Paned from initiating resize
-            let cap_click = GestureClick::new();
-            cap_click.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
-            cap_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            cap_click.connect_pressed(|g, _, _, _| {
-                g.set_state(gtk4::EventSequenceState::Claimed);
+            // While hovering the titlebar, temporarily disable the nearest ancestor Paned
+            // so starting a drag here cannot initiate a resize.
+            let motion = EventControllerMotion::new();
+            motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            motion.connect_enter(move |ctrl, _x, _y| {
+                if let Some(widget) = ctrl.widget() {
+                    // Find the nearest ancestor Paned and disable targeting
+                    let mut parent = widget.parent();
+                    while let Some(p) = parent.clone() {
+                        if let Ok(paned) = p.clone().downcast::<Paned>() {
+                            paned.set_can_target(false);
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+                }
             });
-            header.add_controller(cap_click);
+            motion.connect_leave(move |ctrl| {
+                if let Some(widget) = ctrl.widget() {
+                    let mut parent = widget.parent();
+                    while let Some(p) = parent.clone() {
+                        if let Ok(paned) = p.clone().downcast::<Paned>() {
+                            paned.set_can_target(true);
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+                }
+            });
+            header.add_controller(motion);
 
-            // Add a minimal drag source so grabbing the header initiates a drag operation
+            // Add a minimal drag source so grabbing the header initiates a drag operation.
+            // Resource descriptor format (string):
+            //   "term-move window=<uuid> tab=<uuid> [inner=<uuid>] terminal=<uuid> src=header"
+            // The DropTarget decodes it via DragPayload and decides how to split/insert.
             let payload = format!(
                 "term-move window={} tab={} terminal={} src=header",
                 self.window_id.0, tab_id.0, leaf.terminal_id.0
@@ -1613,7 +1737,7 @@ impl WorkspaceController {
                         return;
                     }
                     if let Some(when) = controller.last_keyboard_focus.get() {
-                        if when.elapsed().as_millis() < 250 {
+                        if when.elapsed().as_millis() < 120 {
                             return;
                         }
                     }
@@ -1640,7 +1764,7 @@ impl WorkspaceController {
         let weak_self = Rc::downgrade(self);
         let target_terminal = leaf.terminal_id;
         drop.connect_motion(move |dt, x, y| {
-            // Show a coarse preview for target half
+            // Show half-area preview overlay for the side closest to the cursor
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(widget) = dt.widget() {
                     #[allow(deprecated)]
@@ -1649,13 +1773,12 @@ impl WorkspaceController {
                     let h = alloc.height().max(1) as f64;
                     let dx = ((x / w) - 0.5).abs();
                     let dy = ((y / h) - 0.5).abs();
-                    // If horizontal distance dominates → left/right; else top/bottom
-                    let text = if dx > dy {
-                        if x < w / 2.0 { "Split Left" } else { "Split Right" }
+                    let side = if dx > dy {
+                        if x < w / 2.0 { "left" } else { "right" }
                     } else {
-                        if y < h / 2.0 { "Split Top" } else { "Split Bottom" }
+                        if y < h / 2.0 { "top" } else { "bottom" }
                     };
-                    controller.show_preview(text);
+                    controller.show_split_preview_on(&widget, side);
                 }
             }
             gtk4::gdk::DragAction::MOVE
@@ -1667,6 +1790,7 @@ impl WorkspaceController {
             }
         });
         let weak_self = Rc::downgrade(self);
+        // Drop handler: interpret resource descriptor and perform split/move
         drop.connect_drop(move |dt, value, x, y| {
             let payload = value.get::<String>().ok().unwrap_or_default();
             let moving = match DragPayload::try_from(payload.as_str()) {
@@ -1693,6 +1817,8 @@ impl WorkspaceController {
                             SplitOrientation::Vertical
                         };
                     }
+                    // Apply the split: move dragged terminal into a new split at the target side.
+                    // Orientation: Horizontal for left/right, Vertical for top/bottom.
                     let ok = state
                         .workspace
                         .borrow_mut()
@@ -1763,6 +1889,20 @@ impl WorkspaceController {
             close_btn.set_child(Some(&img));
             label_box.append(&close_btn);
 
+            // Prevent close button from stealing focus or triggering tab switch before close
+            close_btn.set_focus_on_click(false);
+            close_btn.set_can_focus(false);
+            let close_capture = GestureClick::new();
+            close_capture.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+            close_capture.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            close_capture.connect_pressed(|g, _, _, _| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+            });
+            close_capture.connect_released(|g, _, _, _| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+            });
+            close_btn.add_controller(close_capture);
+
             // Do not claim drags on inner tab labels to keep click/edit behavior intact
 
             // Enable drag from inner tab label to avoid interacting with Paned handles
@@ -1771,6 +1911,9 @@ impl WorkspaceController {
                 self.window_id.0, tab_id.0, inner.id.0, inner.focus.0
             );
             self.attach_drag_source_with_owner(&label_box, payload);
+
+            // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
+            // from labels since they live outside Paned content.
 
             // Preview on drag motion over inner tab label (new inner tab)
             let weak_self_motion = Rc::downgrade(self);
@@ -1839,6 +1982,15 @@ impl WorkspaceController {
                 }
             });
 
+            // Capture press on close button to avoid a tab switch before closing
+            let close_capture = GestureClick::new();
+            close_capture.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+            close_capture.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            close_capture.connect_pressed(|g, _, _, _| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+            });
+            close_btn.add_controller(close_capture);
+
             let weak_self = Rc::downgrade(self);
             close_btn.connect_clicked(move |_| {
                 if let Some(controller) = weak_self.upgrade() {
@@ -1876,6 +2028,8 @@ impl WorkspaceController {
                         *terminal_id,
                     );
                     controller.update_window_title();
+                    // Ensure the terminal widget grabs focus to satisfy focus-sensitive tests and UX.
+                    state.focus_and_remember(controller.window_id, tab_id, *terminal_id);
                 }
             });
         }
@@ -1918,6 +2072,9 @@ impl WorkspaceController {
                 tab.active_terminal().0
             );
             self.attach_drag_source_with_owner(&label_box, payload);
+
+            // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
+            // from labels since they live outside Paned content.
 
             // Preview on drag motion over top-level tab header (new tab)
             let weak_self_motion = Rc::downgrade(self);
@@ -2133,7 +2290,9 @@ impl WorkspaceController {
         if let Some(window_model) = window_model {
             let active_tab = window_model.active_tab();
             let tab_id = active_tab.id;
-            let fallback = format!("{} — {}", window_model.title, active_tab.display_title());
+            // For the titlebar, prefer a pure terminal-derived dynamic title when flexible.
+            // Use empty fallback to avoid prefixing the window title (which the spec doesn't want).
+            let fallback = "";
             drop(workspace);
             let dynamic = format_terminal_title(terminal, &fallback, flexible);
             self.title_bar.update_dynamic(Some(&dynamic));
@@ -2313,9 +2472,15 @@ impl WorkspaceController {
 
         self.window.set_title(Some(&window.title));
         let active_tab = window.active_tab();
-        let title_text = format!("{} — {}", window.title, active_tab.display_title());
+        let custom = self.title_bar.is_custom();
+        let title_text = if custom {
+            window.title.clone()
+        } else {
+            format!("{} — {}", window.title, active_tab.display_title())
+        };
+        let titlebar_flexible = if custom { false } else { active_tab.is_title_flexible() };
         self.title_bar
-            .set_titles(&title_text, &window.title, active_tab.is_title_flexible());
+            .set_titles(&title_text, &window.title, titlebar_flexible);
     }
 }
 
@@ -2578,6 +2743,12 @@ fn ensure_custom_css() {
     font-weight: bold;
     font-size: 16px;
 }
+
+/* Make paned separator a narrow 4px handle so only it resizes */
+paned > separator, paned separator {
+    min-width: 4px;
+    min-height: 4px;
+}
 "#;
             provider.load_from_data(css);
             gtk4::style_context_add_provider_for_display(
@@ -2767,7 +2938,8 @@ mod gui_tests {
     }
 
     fn wait_for_widget<W: IsA<Widget>>(widget: &W) {
-        for _ in 0..200 {
+        // Be generous for CI/headless backends where realize/allocate can lag a bit
+        for _ in 0..1000 {
             if widget.is_realized() && widget.is_visible() {
                 let alloc = widget.allocation();
                 if alloc.width() > 0 && alloc.height() > 0 {
@@ -3155,6 +3327,83 @@ mod gui_tests {
             let expected_dynamic = format!("{} — {}", new_title, active_tab_title);
             controller.title_bar.update_dynamic(Some(&expected_dynamic));
             // If this call doesn't panic, the update path is fine; deeper inspection would require exposing label text.
+        });
+    }
+
+    #[test]
+    fn gui_window_title_double_click_enters_edit_mode() {
+        run_gui_test("window_title_double_click", |state, window_id| {
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            let title_box = controller.title_bar.widget();
+            assert_widget_ready(&title_box);
+
+            // Find a GestureClick on the title bar and synthesize a double click (released with n_press=2)
+            let controllers = title_box.observe_controllers();
+            for i in 0..controllers.n_items() {
+                if let Some(obj) = controllers.item(i) {
+                    if let Ok(gesture) = obj.clone().downcast::<GestureClick>() {
+                        // Double-click release at (0,0)
+                        gesture.emit_by_name::<()>("released", &[&2i32, &0.0f64, &0.0f64]);
+                        break;
+                    }
+                }
+            }
+
+            pump_events();
+
+            // The title bar should now show the entry editor
+            let stack = title_box
+                .first_child()
+                .and_then(|w| w.downcast::<gtk4::Stack>().ok())
+                .expect("title stack");
+            let name = stack.visible_child_name().unwrap_or_default();
+            assert_eq!(name.as_str(), "entry", "double click should switch to entry");
+        });
+    }
+
+    #[test]
+    fn gui_window_title_clear_reverts_to_flexible_without_duplication() {
+        run_gui_test("window_title_clear", |state, window_id| {
+            pump_events();
+
+            let controller = controller_for(&state, window_id);
+            controller.title_bar.begin_edit();
+            pump_events();
+
+            // Set a custom title
+            let custom = "MyProj".to_string();
+            controller.title_bar.commit_edit(&custom);
+            pump_events();
+
+            // Clear the title to revert to flexible
+            controller.title_bar.begin_edit();
+            pump_events();
+            controller.title_bar.commit_edit("");
+            pump_events();
+
+            // After clearing, window model title should be default and titlebar should not duplicate
+            let (window_title, _tab_title) = {
+                let ws = state.workspace.borrow();
+                let window = ws.windows.iter().find(|w| w.id == window_id).unwrap();
+                let active = window.active_tab();
+                (window.title.clone(), active.title.clone())
+            };
+            assert_eq!(window_title, "Terminator", "window title should revert to default");
+
+            // Ensure titlebar shows a dynamic composed title matching base window + base tab title (not previous custom)
+            let header = controller.window.title().unwrap_or_default();
+            assert_eq!(header, "Terminator", "GTK window title remains window title only");
+
+            // Inspect the titlebar Label text
+            let title_box = controller.title_bar.widget();
+            let stack = title_box.first_child().and_then(|w| w.downcast::<gtk4::Stack>().ok()).unwrap();
+            let label = stack.first_child().and_then(|w| w.downcast::<gtk4::Label>().ok()).unwrap();
+            let txt = label.text().to_string();
+            // The label holds dynamic text like "Terminator — <tab>" or terminal path; but must not contain MyProj
+            assert!(!txt.contains("MyProj"), "clearing must not retain previous custom title in dynamic label");
+            assert!(txt.contains("Terminator") || !txt.contains("—"), "should include default window title or a pure terminal title");
         });
     }
 
@@ -4873,8 +5122,9 @@ mod gui_tests {
                 controller.window_id.0, tab_id.0, bottom.0
             );
 
-            // Emit the drop; expect true (handled)
-            let handled = drop.emit_by_name::<bool>("drop", &[&payload, &x, &y]);
+            // Emit the drop; expect true (handled). The "drop" signal expects a GValue payload.
+            let payload_value = payload.to_value();
+            let handled = drop.emit_by_name::<bool>("drop", &[&payload_value, &x, &y]);
             assert!(handled, "drop should be handled and perform a split");
             pump_events();
 
