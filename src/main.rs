@@ -1484,18 +1484,27 @@ impl WorkspaceController {
         self.window.set_title(Some(&window_model.title));
 
         let active_tab = window_model.active_tab();
-        let title_text = if self.title_bar.is_custom() {
-            window_model.title.clone()
+        let custom = self.title_bar.is_custom();
+        let flexible = !custom && active_tab.is_title_flexible();
+        if flexible {
+            // Compute a pure terminal-derived dynamic title; do not prefix with window title
+            let term_id = active_tab.active_terminal();
+            let dynamic = if let Some(term) = state.registry.borrow().terminal(term_id) {
+                format_terminal_title(&term, "", true)
+            } else {
+                String::new()
+            };
+            self.title_bar
+                .set_titles(&dynamic, &window_model.title, true);
         } else {
-            format!("{} — {}", window_model.title, active_tab.display_title())
-        };
-        let titlebar_flexible = if self.title_bar.is_custom() {
-            false
-        } else {
-            active_tab.is_title_flexible()
-        };
-        self.title_bar
-            .set_titles(&title_text, &window_model.title, titlebar_flexible);
+            let composed = if custom {
+                window_model.title.clone()
+            } else {
+                format!("{} — {}", window_model.title, active_tab.title)
+            };
+            self.title_bar
+                .set_titles(&composed, &window_model.title, false);
+        }
 
         if let Some(handler_id) = self.switch_handler.borrow().as_ref() {
             signal_handler_block(&self.notebook, handler_id);
@@ -2473,14 +2482,25 @@ impl WorkspaceController {
         self.window.set_title(Some(&window.title));
         let active_tab = window.active_tab();
         let custom = self.title_bar.is_custom();
-        let title_text = if custom {
-            window.title.clone()
+        let flexible = !custom && active_tab.is_title_flexible();
+        if flexible {
+            let term_id = active_tab.active_terminal();
+            let dynamic = if let Some(term) = state.registry.borrow().terminal(term_id) {
+                format_terminal_title(&term, "", true)
+            } else {
+                String::new()
+            };
+            self.title_bar
+                .set_titles(&dynamic, &window.title, true);
         } else {
-            format!("{} — {}", window.title, active_tab.display_title())
-        };
-        let titlebar_flexible = if custom { false } else { active_tab.is_title_flexible() };
-        self.title_bar
-            .set_titles(&title_text, &window.title, titlebar_flexible);
+            let composed = if custom {
+                window.title.clone()
+            } else {
+                format!("{} — {}", window.title, active_tab.title)
+            };
+            self.title_bar
+                .set_titles(&composed, &window.title, false);
+        }
     }
 }
 
