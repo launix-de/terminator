@@ -46,6 +46,49 @@ const ACTION_DEFS: &[(ActionId, &str)] = &[
     (ActionId::PrevTab, "Previous Tab"),
 ];
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct DragPayload {
+    window: WindowId,
+    tab: Option<TabId>,
+    inner: Option<InnerTabId>,
+    terminal: TerminalId,
+    src: Option<String>,
+}
+
+impl DragPayload {
+    fn parse_uuid(s: &str) -> Option<uuid::Uuid> {
+        uuid::Uuid::parse_str(s.trim_matches(|c| c == '"')).ok()
+    }
+}
+
+impl TryFrom<&str> for DragPayload {
+    type Error = ();
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let mut window = None;
+        let mut tab = None;
+        let mut inner = None;
+        let mut terminal = None;
+        let mut src: Option<String> = None;
+        for part in s.split_whitespace() {
+            if let Some((k, v)) = part.split_once('=') {
+                match k {
+                    "window" => window = Self::parse_uuid(v).map(WindowId),
+                    "tab" => tab = Self::parse_uuid(v).map(TabId),
+                    "inner" => inner = Self::parse_uuid(v).map(InnerTabId),
+                    "terminal" => terminal = Self::parse_uuid(v).map(TerminalId),
+                    "src" => src = Some(v.trim_matches(|c| c == '"').to_string()),
+                    _ => {}
+                }
+            }
+        }
+        match (window, terminal) {
+            (Some(window), Some(terminal)) => Ok(DragPayload { window, tab, inner, terminal, src }),
+            _ => Err(())
+        }
+    }
+}
+
 fn main() -> gtk4::glib::ExitCode {
     let app = Application::builder()
         .application_id("dev.gnome.Terminator2")
@@ -794,12 +837,15 @@ struct WorkspaceController {
     context_menu_gestures: RefCell<HashMap<TerminalId, GestureClick>>,
     hover_motions: RefCell<HashMap<TerminalId, EventControllerMotion>>,
     last_keyboard_focus: Cell<Option<std::time::Instant>>,
+    preview_overlay: RefCell<Option<gtk4::Box>>,
     preview_label: RefCell<Option<gtk4::Label>>,
     drop_targets: RefCell<HashMap<TerminalId, gtk4::DropTarget>>,
     header_drags: RefCell<HashMap<TerminalId, GestureDrag>>,
+    drag_in_progress: Cell<bool>,
 }
 
 impl WorkspaceController {
+    #[allow(dead_code)]
     fn claim_primary_drag(widget: &impl IsA<Widget>) {
         let cap_drag = GestureDrag::new();
         cap_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -809,12 +855,24 @@ impl WorkspaceController {
         widget.add_controller(cap_drag);
     }
 
-    fn attach_drag_source(widget: &impl IsA<Widget>, payload: String) {
+    fn attach_drag_source_with_owner(self: &Rc<Self>, widget: &impl IsA<Widget>, payload: String) {
         let drag = DragSource::new();
         drag.set_actions(gtk4::gdk::DragAction::MOVE);
         drag.connect_prepare(move |_, _, _| {
             let v = payload.to_value();
             Some(gtk4::gdk::ContentProvider::for_value(&v))
+        });
+        let weak_self = Rc::downgrade(self);
+        drag.connect_drag_begin(move |_, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                controller.set_drag_in_progress(true);
+            }
+        });
+        let weak_self = Rc::downgrade(self);
+        drag.connect_drag_end(move |_, _, _| {
+            if let Some(controller) = weak_self.upgrade() {
+                controller.set_drag_in_progress(false);
+            }
         });
         widget.add_controller(drag);
     }
@@ -844,29 +902,65 @@ impl WorkspaceController {
         }
     }
 
-    
+    fn for_each_child(root: &Widget, f: &mut dyn FnMut(&Widget)) {
+        f(root);
+        let mut child = root.first_child();
+        while let Some(c) = child {
+            Self::for_each_child(&c, f);
+            child = c.next_sibling();
+        }
+    }
+
+    fn set_drag_in_progress(&self, active: bool) {
+        if self.drag_in_progress.replace(active) == active {
+            return;
+        }
+        if let Some(root) = self.active_page_widget() {
+            let mut toggle = |w: &Widget| {
+                if w.is::<Paned>() {
+                    w.set_can_target(!active);
+                }
+            };
+            Self::for_each_child(&root, &mut toggle);
+        }
+    }
+
 
     #[allow(deprecated)]
     fn show_preview(&self, text: &str) {
-        // Reuse or create a floating label as a simple preview indicator
+        // Create semi-transparent black overlay with centered label
         if let Some(lbl) = self.preview_label.borrow().as_ref() {
             lbl.set_text(text);
+            if let Some(boxw) = self.preview_overlay.borrow().as_ref() {
+                boxw.show();
+            }
             lbl.show();
             return;
         }
+        let boxw = gtk4::Box::new(Orientation::Vertical, 0);
+        boxw.add_css_class("dnd-preview");
+        boxw.set_halign(gtk4::Align::Fill);
+        boxw.set_valign(gtk4::Align::Fill);
+        boxw.set_hexpand(true);
+        boxw.set_vexpand(true);
+
         let label = gtk4::Label::new(Some(text));
-        label.add_css_class("preview-overlay");
+        label.add_css_class("dnd-preview-label");
         label.set_halign(gtk4::Align::Center);
         label.set_valign(gtk4::Align::Center);
-        self.overlay.add_overlay(&label);
+        boxw.append(&label);
+
+        self.overlay.add_overlay(&boxw);
+        boxw.show();
         label.show();
+        self.preview_overlay.borrow_mut().replace(boxw);
         self.preview_label.borrow_mut().replace(label);
     }
 
     #[allow(deprecated)]
     fn hide_preview(&self) {
-        if let Some(lbl) = self.preview_label.borrow().as_ref() {
-            lbl.hide();
+        if let Some(boxw) = self.preview_overlay.borrow().as_ref() {
+            boxw.hide();
         }
     }
 
@@ -975,7 +1069,7 @@ impl WorkspaceController {
         let notebook = Notebook::new();
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
-        notebook.set_scrollable(true);
+        notebook.set_scrollable(false);
         let overlay = gtk4::Overlay::new();
         overlay.set_child(Some(&notebook));
         container.append(&overlay);
@@ -1000,14 +1094,18 @@ impl WorkspaceController {
             context_menu_gestures: RefCell::new(HashMap::new()),
             hover_motions: RefCell::new(HashMap::new()),
             last_keyboard_focus: Cell::new(None),
+            preview_overlay: RefCell::new(None),
             preview_label: RefCell::new(None),
             drop_targets: RefCell::new(HashMap::new()),
             header_drags: RefCell::new(HashMap::new()),
+            drag_in_progress: Cell::new(false),
         });
 
         controller.install_actions();
         controller.setup_callbacks();
         controller.rebuild();
+
+        // We adjust tab label widths on rebuild; hook to size changes can be added if needed.
 
         controller
     }
@@ -1341,6 +1439,24 @@ impl WorkspaceController {
             .registry()
             .borrow_mut()
             .cleanup_for_window(self.window_id, &keep_ids);
+
+        self.adjust_tab_label_widths();
+    }
+
+    fn adjust_tab_label_widths(&self) {
+        // Compute a rough per-tab character budget based on available width.
+        #[allow(deprecated)]
+        let alloc = self.notebook.allocation();
+        let width = alloc.width().max(1) as i32;
+        let n = self.notebook.n_pages().max(1) as i32;
+        // Reserve some pixels for close button and padding
+        let per_px = (width / n).saturating_sub(40).max(40);
+        // Assume ~9 px per character at default size
+        let chars = (per_px / 9).clamp(8, 50);
+        for label in self.tab_labels.borrow().values() {
+            label.set_ellipsize_end();
+            label.set_max_width_chars(chars);
+        }
     }
 
     fn focus_terminal(&self, terminal_id: TerminalId) {
@@ -1452,7 +1568,7 @@ impl WorkspaceController {
                 "term-move window={} tab={} terminal={} src=header",
                 self.window_id.0, tab_id.0, leaf.terminal_id.0
             );
-            Self::attach_drag_source(&header, payload);
+            self.attach_drag_source_with_owner(&header, payload);
             wrapper.append(&header);
         }
         wrapper.append(&terminal);
@@ -1553,21 +1669,10 @@ impl WorkspaceController {
         let weak_self = Rc::downgrade(self);
         drop.connect_drop(move |dt, value, x, y| {
             let payload = value.get::<String>().ok().unwrap_or_default();
-            // Expect payload like: "term-move window=... tab=... terminal=... src=..."
-            let mut moving_id: Option<TerminalId> = None;
-            for part in payload.split_whitespace() {
-                if let Some((k, v)) = part.split_once('=') {
-                    match k {
-                        "terminal" => {
-                            if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
-                                moving_id = Some(TerminalId(uuid));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let moving = match moving_id { Some(m) => m, None => return false };
+            let moving = match DragPayload::try_from(payload.as_str()) {
+                Ok(p) => p.terminal,
+                Err(_) => return false,
+            };
             if moving == target_terminal {
                 return false;
             }
@@ -1658,15 +1763,33 @@ impl WorkspaceController {
             close_btn.set_child(Some(&img));
             label_box.append(&close_btn);
 
-            // Claim drag-begin on inner tab labels so Paned doesn't resize when starting a drag
-            Self::claim_primary_drag(&label_box);
+            // Do not claim drags on inner tab labels to keep click/edit behavior intact
 
             // Enable drag from inner tab label to avoid interacting with Paned handles
             let payload = format!(
                 "term-move window={} tab={} inner={} terminal={} src=inner_label",
                 self.window_id.0, tab_id.0, inner.id.0, inner.focus.0
             );
-            Self::attach_drag_source(&label_box, payload);
+            self.attach_drag_source_with_owner(&label_box, payload);
+
+            // Preview on drag motion over inner tab label (new inner tab)
+            let weak_self_motion = Rc::downgrade(self);
+            let drop_motion = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            drop_motion.connect_motion(move |_, _, _| {
+                if let Some(controller) = weak_self_motion.upgrade() {
+                    controller.show_preview("New Inner Tab");
+                }
+                gtk4::gdk::DragAction::MOVE
+            });
+            drop_motion.connect_leave({
+                let weak_self = Rc::downgrade(self);
+                move |_| {
+                    if let Some(controller) = weak_self.upgrade() {
+                        controller.hide_preview();
+                    }
+                }
+            });
+            label_box.add_controller(drop_motion);
 
             // Drop onto inner tab label box: move existing terminal into a new inner tab
             let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
@@ -1674,29 +1797,12 @@ impl WorkspaceController {
             let weak_self = Rc::downgrade(self);
             drop.connect_drop(move |_dt, value, _x, _y| {
                 let payload = value.get::<String>().ok().unwrap_or_default();
-                let mut moving_id: Option<TerminalId> = None;
-                let mut src_window: Option<WindowId> = None;
-                for part in payload.split_whitespace() {
-                    if let Some((k, v)) = part.split_once('=') {
-                        match k {
-                            "terminal" => {
-                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
-                                    moving_id = Some(TerminalId(uuid));
-                                }
-                            }
-                            "window" => {
-                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
-                                    src_window = Some(WindowId(uuid));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                let (moving, src_window) = match (moving_id, src_window) {
-                    (Some(m), Some(w)) => (m, w),
-                    _ => return false,
+                let parsed = match DragPayload::try_from(payload.as_str()) {
+                    Ok(p) => p,
+                    Err(_) => return false,
                 };
+                let moving = parsed.terminal;
+                let src_window = parsed.window;
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
                         if let Some(tab_id) = state.current_tab_id(controller.window_id) {
@@ -1802,8 +1908,7 @@ impl WorkspaceController {
             close_btn.set_child(Some(&img));
             label_box.append(&close_btn);
 
-            // Claim drag-begin on top-level labels; this does not claim clicks and won't affect switching
-            Self::claim_primary_drag(&label_box);
+            // Do not claim drags on top-level tab labels to avoid interfering with tab switching
 
             // Enable drag from top-level tab labels as well
             let payload = format!(
@@ -1812,36 +1917,38 @@ impl WorkspaceController {
                 tab.id.0,
                 tab.active_terminal().0
             );
-            Self::attach_drag_source(&label_box, payload);
+            self.attach_drag_source_with_owner(&label_box, payload);
+
+            // Preview on drag motion over top-level tab header (new tab)
+            let weak_self_motion = Rc::downgrade(self);
+            let drop_motion = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            drop_motion.connect_motion(move |_, _, _| {
+                if let Some(controller) = weak_self_motion.upgrade() {
+                    controller.show_preview("New Tab");
+                }
+                gtk4::gdk::DragAction::MOVE
+            });
+            drop_motion.connect_leave({
+                let weak_self = Rc::downgrade(self);
+                move |_| {
+                    if let Some(controller) = weak_self.upgrade() {
+                        controller.hide_preview();
+                    }
+                }
+            });
+            label_box.add_controller(drop_motion);
 
             // Drop on top-level tab label: move existing terminal into a new top-level tab
             let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
             let weak_self = Rc::downgrade(self);
             drop.connect_drop(move |_dt, value, _x, _y| {
                 let payload = value.get::<String>().ok().unwrap_or_default();
-                let mut moving_id: Option<TerminalId> = None;
-                let mut src_window: Option<WindowId> = None;
-                for part in payload.split_whitespace() {
-                    if let Some((k, v)) = part.split_once('=') {
-                        match k {
-                            "terminal" => {
-                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
-                                    moving_id = Some(TerminalId(uuid));
-                                }
-                            }
-                            "window" => {
-                                if let Ok(uuid) = uuid::Uuid::parse_str(v.trim_matches(|c| c=='"')) {
-                                    src_window = Some(WindowId(uuid));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                let (moving, src_window) = match (moving_id, src_window) {
-                    (Some(m), Some(w)) => (m, w),
-                    _ => return false,
+                let parsed = match DragPayload::try_from(payload.as_str()) {
+                    Ok(p) => p,
+                    Err(_) => return false,
                 };
+                let moving = parsed.terminal;
+                let src_window = parsed.window;
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
                         if let Some(new_tab) = state
@@ -2458,6 +2565,18 @@ fn ensure_custom_css() {
 .custom-title entry selection {
     background-color: rgba(255, 255, 255, 0.35);
     color: #c00000;
+}
+
+/* Drag-and-drop preview overlay */
+.dnd-preview {
+    background-color: rgba(0, 0, 0, 0.5);
+}
+.dnd-preview * {
+    color: #ffffff;
+}
+.dnd-preview-label {
+    font-weight: bold;
+    font-size: 16px;
 }
 "#;
             provider.load_from_data(css);
@@ -4328,6 +4447,50 @@ mod gui_tests {
                 // Validate IDs haven't changed
                 let ids: Vec<TabId> = window.tabs.iter().map(|t| t.id).collect();
                 assert_eq!(ids, initial_ids, "tab IDs changed unexpectedly");
+            }
+        });
+    }
+
+    #[test]
+    fn gui_many_tabs_labels_ellipsize_and_no_scroll() {
+        run_gui_test("many_tabs_ellipsize", |state, window_id| {
+            pump_events();
+
+            // Create many tabs
+            for _ in 0..8 {
+                state.new_tab(window_id);
+                pump_events();
+            }
+
+            let controller = controller_for(&state, window_id);
+            assert_widget_ready(&controller.notebook);
+            // Top-level notebook should not be scrollable
+            assert!(!controller.notebook.is_scrollable(), "tabs should not be scrollable");
+
+            let n = controller.notebook.n_pages();
+            assert!(n >= 5, "expected several tabs to test ellipsizing");
+
+            for i in 0..n {
+                let page = controller.notebook.nth_page(Some(i)).expect("page");
+                let tab_label_widget = controller
+                    .notebook
+                    .tab_label(&page)
+                    .expect("tab label widget");
+                // The label widget is Box [EditableTabLabel(Box(Stack(Label, Entry))), CloseButton]
+                let editable_box = tab_label_widget.first_child().expect("editable box child");
+                let stack = editable_box
+                    .downcast::<gtk4::Box>()
+                    .ok()
+                    .and_then(|b| b.first_child())
+                    .and_then(|w| w.downcast::<gtk4::Stack>().ok())
+                    .expect("stack in editable");
+                let label = stack
+                    .first_child()
+                    .and_then(|w| w.downcast::<gtk4::Label>().ok())
+                    .expect("inner label");
+                use gtk4::pango::EllipsizeMode;
+                assert_eq!(label.ellipsize(), EllipsizeMode::End, "label must ellipsize at end");
+                assert!(label.max_width_chars() > 0, "max width chars should be set");
             }
         });
     }

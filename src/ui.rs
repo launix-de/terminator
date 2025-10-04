@@ -2,6 +2,7 @@ use gtk4::{
     Align, Box, Entry, EventControllerFocus, EventSequenceState, GestureClick, Orientation, Stack,
     StackTransitionType, gdk, prelude::*,
 };
+use gtk4::pango;
 use std::{boxed::Box as StdBox, cell::Cell, cell::RefCell, rc::Rc};
 
 #[derive(Clone)]
@@ -29,6 +30,8 @@ impl EditableTitleBar {
         label.set_xalign(0.0);
         label.set_hexpand(true);
         label.add_css_class("custom-title-label");
+        label.set_single_line_mode(true);
+        label.set_ellipsize(pango::EllipsizeMode::End);
 
         let entry = Entry::new();
         entry.set_hexpand(true);
@@ -204,6 +207,8 @@ impl EditableTabLabel {
         let label = gtk4::Label::new(Some(&initial_title));
         label.set_xalign(0.0);
         label.set_hexpand(true);
+        label.set_single_line_mode(true);
+        label.set_ellipsize(pango::EllipsizeMode::End);
 
         let entry = Entry::new();
         entry.set_hexpand(true);
@@ -274,6 +279,16 @@ impl EditableTabLabel {
 
     pub fn connect_committed<F: Fn(bool, String) + 'static>(&self, callback: F) {
         *self.inner.edit_callback.borrow_mut() = Some(StdBox::new(callback));
+    }
+
+    pub fn set_max_width_chars(&self, chars: i32) {
+        self.inner.label.set_max_width_chars(chars);
+        self.inner.label.set_width_chars(chars);
+    }
+
+    pub fn set_ellipsize_end(&self) {
+        self.inner.label.set_single_line_mode(true);
+        self.inner.label.set_ellipsize(pango::EllipsizeMode::End);
     }
 }
 

@@ -157,6 +157,7 @@ impl WorkspaceModel {
     }
 
     // Move a terminal to split with a target terminal, creating a split at the target.
+    // Returns true if the terminal was removed from its original location and inserted at target.
     #[allow(dead_code)]
     pub fn move_terminal_to_split(
         &mut self,
@@ -201,6 +202,8 @@ impl WorkspaceModel {
     }
 
     #[allow(dead_code)]
+    /// Move an existing `terminal_id` into a brand new top-level tab in `window_id`.
+    /// Returns the new tab id on success.
     pub fn move_terminal_to_new_tab(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<TabId> {
         let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
         // Remove from any tab
@@ -288,6 +291,7 @@ impl WorkspaceModel {
         false
     }
 
+    /// Find the first terminal id in the given tab (DFS order).
     pub fn first_terminal_in_tab(&self, window_id: WindowId, tab_id: TabId) -> Option<TerminalId> {
         let window = self.windows.iter().find(|w| w.id == window_id)?;
         let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
@@ -306,6 +310,7 @@ impl WorkspaceModel {
         Some(id)
     }
 
+    /// Set the active top-level tab for a window (no-op if not found).
     pub fn set_active_tab(&mut self, window_id: WindowId, tab_id: TabId) {
         if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
             if let Some(idx) = window.tabs.iter().position(|t| t.id == tab_id) {
@@ -314,6 +319,8 @@ impl WorkspaceModel {
         }
     }
 
+    /// Focus the given terminal inside `tab_id`.
+    /// Returns true when focus actually changed.
     pub fn set_active_terminal(
         &mut self,
         window_id: WindowId,
@@ -328,6 +335,7 @@ impl WorkspaceModel {
         false
     }
 
+    /// Find a neighbor for focus navigation relative to `terminal_id`.
     pub fn focus_neighbor(
         &self,
         window_id: WindowId,
@@ -347,6 +355,8 @@ impl WorkspaceModel {
             .find_adjacent_terminal(terminal_id, orientation, forward)
     }
 
+    /// Split the given terminal leaf by `orientation`.
+    /// Returns the newly created terminal id on success and focuses it.
     pub fn split_terminal(
         &mut self,
         window_id: WindowId,
@@ -368,6 +378,8 @@ impl WorkspaceModel {
         }
     }
 
+    /// Close a terminal. Removes empty nodes and collapses single-child splits.
+    /// Returns Some(()) if a terminal was removed.
     pub fn close_terminal(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<()> {
         let window_idx = self.windows.iter().position(|w| w.id == window_id)?;
         let window = &mut self.windows[window_idx];
@@ -401,6 +413,7 @@ impl WorkspaceModel {
         Some(())
     }
 
+    /// Rename a top-level tab and set its flexibility flag. Returns true on change.
     pub fn rename_tab(
         &mut self,
         window_id: WindowId,
@@ -418,6 +431,8 @@ impl WorkspaceModel {
         false
     }
 
+    /// Rename an inner tab (inside a Tabs group) and set its flexibility flag.
+    /// Returns true on change.
     pub fn rename_inner_tab(
         &mut self,
         window_id: WindowId,
@@ -440,6 +455,9 @@ impl WorkspaceModel {
         false
     }
 
+    /// Add a new inner tab near the subtree that contains `from_terminal`.
+    /// Prefers wrapping the exact subtree; otherwise adds to the nearest Tabs group; finally wraps the top-level.
+    /// Returns the (inner_tab_id, new_terminal_id) on success and focuses the new terminal.
     pub fn add_inner_tab(
         &mut self,
         window_id: WindowId,
@@ -1207,10 +1225,15 @@ impl LayoutNode {
         }
     }
 
+    /// Remove the terminal `target` from this subtree.
+    ///
+    /// Returns `true` if a terminal was removed anywhere under this node, `false` otherwise.
     fn remove_terminal(&mut self, target: TerminalId) -> bool {
         match self {
+            // Leaf: remove only if it matches; otherwise nothing to do.
             LayoutNode::Terminal(leaf) => {
                 if leaf.terminal_id == target {
+                    // Replace the leaf with an empty split placeholder so callers can detect emptiness
                     *self = LayoutNode::Split(SplitNode {
                         node_id: NodeId(Uuid::new_v4()),
                         orientation: SplitOrientation::Vertical,
@@ -1218,39 +1241,55 @@ impl LayoutNode {
                     });
                     true
                 } else {
-                    true
+                    false
                 }
             }
             LayoutNode::Split(split) => {
-                split.children.retain_mut(|child| match child {
-                    LayoutNode::Terminal(leaf) => leaf.terminal_id != target,
-                    _ => {
-                        let kept = child.remove_terminal(target);
-                        kept
+                let mut removed_any = false;
+                // First, attempt removal inside each child (do not drop children based on return values)
+                for child in &mut split.children {
+                    if child.remove_terminal(target) {
+                        removed_any = true;
                     }
-                });
-                // Collapse if only one child remains
-                if split.children.len() == 1 {
-                    let only = split.children.remove(0);
-                    *self = only;
                 }
-                // Return true if any terminals remain
-                !self.is_empty()
+
+                // Then, explicitly drop any terminal children that match the target (in case of direct children)
+                split.children
+                    .retain(|child| !matches!(child, LayoutNode::Terminal(leaf) if leaf.terminal_id == target));
+
+                // Also drop any children that became empty as a result of recursive removals
+                split.children.retain(|child| !child.is_empty());
+
+                // Collapse degenerate split nodes
+                match split.children.len() {
+                    0 => {
+                        // Entire split is empty now
+                        // Keep as empty split; higher-level callers may collapse further
+                    }
+                    1 => {
+                        let only = split.children.remove(0);
+                        *self = only;
+                    }
+                    _ => {}
+                }
+
+                removed_any
             }
             LayoutNode::Tabs(group) => {
-                let maybe_idx = group.tabs.iter().enumerate().find_map(|(idx, inner)| {
-                    if inner.root.contains_terminal(target) {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(idx) = maybe_idx {
+                // Find the inner that contains the target and attempt removal inside it
+                if let Some(idx) = group
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, inner)| if inner.root.contains_terminal(target) { Some(idx) } else { None })
+                {
                     let inner = &mut group.tabs[idx];
-                    let kept = inner.root.remove_terminal(target);
+                    let removed = inner.root.remove_terminal(target);
+                    // If the inner became empty after removal, drop it and adjust active index
                     if inner.root.is_empty() {
                         group.tabs.remove(idx);
                         if group.tabs.is_empty() {
+                            // Replace whole Tabs with an empty split placeholder
                             *self = LayoutNode::Split(SplitNode {
                                 node_id: NodeId(Uuid::new_v4()),
                                 orientation: SplitOrientation::Vertical,
@@ -1264,7 +1303,7 @@ impl LayoutNode {
                             }
                         }
                     }
-                    kept
+                    removed
                 } else {
                     false
                 }
@@ -1663,6 +1702,55 @@ mod tests {
         let tab = &window.tabs[0];
         let new_id = new.unwrap();
         assert!(tab.root.contains_terminal(new_id));
+    }
+
+    #[test]
+    fn closing_all_terminals_in_one_tab_removes_that_tab() {
+        // Start with a single window and one tab
+        let (mut ws, window_id, _first_tab_id, first_term) = setup_workspace();
+
+        // Build a 4-terminal layout in the first tab:
+        // vertical split -> two branches; then split each branch horizontally.
+        let right = ws
+            .split_terminal(window_id, first_term, SplitOrientation::Vertical)
+            .expect("vertical split created");
+        let left_new = ws
+            .split_terminal(window_id, first_term, SplitOrientation::Horizontal)
+            .expect("left branch horizontal split");
+        let right_new = ws
+            .split_terminal(window_id, right, SplitOrientation::Horizontal)
+            .expect("right branch horizontal split");
+
+        // Add a second tab to ensure the window remains after removing the first tab
+        let second_tab_id = ws
+            .add_tab_to_window(window_id)
+            .expect("second tab added");
+        // Also give it a non-trivial layout so the window isn't empty by accident
+        let second_first = ws
+            .first_terminal_in_tab(window_id, second_tab_id)
+            .expect("second tab first terminal");
+        let second_right = ws
+            .split_terminal(window_id, second_first, SplitOrientation::Vertical)
+            .expect("second vertical split");
+        let _ = ws
+            .split_terminal(window_id, second_first, SplitOrientation::Horizontal)
+            .expect("second left horizontal split");
+        let _ = ws
+            .split_terminal(window_id, second_right, SplitOrientation::Horizontal)
+            .expect("second right horizontal split");
+
+        // Now close all four terminals that belong to the first tab
+        assert!(ws.close_terminal(window_id, left_new).is_some());
+        assert!(ws.close_terminal(window_id, first_term).is_some());
+        assert!(ws.close_terminal(window_id, right_new).is_some());
+        assert!(ws.close_terminal(window_id, right).is_some());
+
+        // The first tab should be removed; window must retain only the second tab
+        assert_eq!(ws.windows.len(), 1, "window should remain present");
+        let window = &ws.windows[0];
+        assert_eq!(window.tabs.len(), 1, "closing last terminal must remove the tab");
+        assert_eq!(window.tabs[0].id, second_tab_id, "remaining tab should be the second tab");
+        assert!(window.tabs[0].root.first_terminal_id().is_some(), "remaining tab should have terminals");
     }
 }
 
