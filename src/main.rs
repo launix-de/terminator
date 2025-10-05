@@ -3,6 +3,7 @@ mod ui;
 mod tabs;
 mod node;
 mod split;
+mod window;
 
 use crate::model::{
     ActionId, FocusDirection, InnerTab, InnerTabId, KeybindingMap, LayoutNode, SplitNode,
@@ -11,12 +12,13 @@ use crate::model::{
 };
 use crate::ui::{EditableTabLabel, EditableTitleBar};
 use crate::tabs::build_tab_label;
+use crate::window::TerminalRegistry;
 use glib::signal::{signal_handler_block, signal_handler_unblock};
 use gtk4::{
     Application, ApplicationWindow, Box, Entry, EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, DragSource,
     HeaderBar, Label, ListBox, ListBoxRow, Notebook, Orientation, Paned, PopoverMenu,
     ResponseType, Widget,
-    gdk::{RGBA, Rectangle},
+    gdk::{Rectangle},
     gio, glib,
     prelude::*,
 };
@@ -1911,19 +1913,7 @@ impl WorkspaceController {
 
             let (label_box, inner_label, close_btn) = build_tab_label(initial_title, inner.is_title_flexible());
 
-            // Prevent close button from stealing focus or triggering tab switch before close
-            close_btn.set_focus_on_click(false);
-            close_btn.set_can_focus(false);
-            let close_capture = GestureClick::new();
-            close_capture.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
-            close_capture.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            close_capture.connect_pressed(|g, _, _, _| {
-                g.set_state(gtk4::EventSequenceState::Claimed);
-            });
-            close_capture.connect_released(|g, _, _, _| {
-                g.set_state(gtk4::EventSequenceState::Claimed);
-            });
-            close_btn.add_controller(close_capture);
+            crate::tabs::attach_close_capture(&close_btn);
 
             // Do not claim drags on inner tab labels to keep click/edit behavior intact
 
@@ -2075,8 +2065,6 @@ impl WorkspaceController {
             page.set_vexpand(true);
 
             let (label_box, tab_label, close_btn) = build_tab_label(tab.display_title(), tab.is_title_flexible());
-
-            // Do not claim drags on top-level tab labels to avoid interfering with tab switching
 
             // Enable drag from top-level tab labels as well
             let payload = format!(
@@ -2509,222 +2497,6 @@ impl WorkspaceController {
     }
 }
 
-struct TerminalRegistry {
-    entries: HashMap<TerminalId, Rc<TerminalEntry>>,
-    owner: Weak<AppState>,
-}
-
-impl TerminalRegistry {
-    fn new(owner: Weak<AppState>) -> Self {
-        Self {
-            entries: HashMap::new(),
-            owner,
-        }
-    }
-
-    fn ensure_terminal(&mut self, id: TerminalId) {
-        if self.entries.contains_key(&id) {
-            return;
-        }
-
-        let terminal = Terminal::new();
-        terminal.set_hexpand(true);
-        terminal.set_vexpand(true);
-        terminal.add_css_class("view");
-        terminal.add_css_class("terminal");
-        let entry = TerminalEntry::new(id, terminal.clone(), self.owner.clone());
-        setup_terminal_theme(&terminal);
-        spawn_shell(&terminal);
-        self.entries.insert(id, entry);
-    }
-
-    fn attach_terminal(&mut self, id: TerminalId, window: WindowId, flexible: bool) -> Terminal {
-        self.ensure_terminal(id);
-        let entry = self.entries.get(&id).expect("terminal exists");
-        if entry.terminal.parent().is_some() {
-            entry.terminal.unparent();
-        }
-        entry.window_id.replace(Some(window));
-        entry.flexible.set(flexible);
-        entry.refresh_labels();
-        entry.terminal.clone()
-    }
-
-    fn register_label(&mut self, id: TerminalId, label: &Label, flexible: bool) {
-        if let Some(entry) = self.entries.get(&id) {
-            entry.flexible.set(flexible);
-            entry.register_label(label);
-        }
-    }
-
-    fn terminal(&self, id: TerminalId) -> Option<Terminal> {
-        self.entries.get(&id).map(|entry| entry.terminal.clone())
-    }
-
-    fn remove_terminal(&mut self, id: TerminalId) {
-        self.entries.remove(&id);
-    }
-
-    fn window_for_terminal(&self, id: TerminalId) -> Option<WindowId> {
-        self.entries
-            .get(&id)
-            .and_then(|entry| entry.window_id.get())
-    }
-
-    fn cleanup_for_window(&mut self, window: WindowId, keep: &[TerminalId]) {
-        let keep: HashSet<_> = keep.iter().copied().collect();
-        self.entries.retain(|id, entry| {
-            if entry.window_id.get() == Some(window) && !keep.contains(id) {
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    fn reapply_theme(&self) {
-        for entry in self.entries.values() {
-            apply_terminal_theme(&entry.terminal);
-        }
-    }
-}
-
-struct TerminalEntry {
-    id: TerminalId,
-    terminal: Terminal,
-    window_id: Cell<Option<WindowId>>,
-    flexible: Cell<bool>,
-    labels: RefCell<Vec<glib::WeakRef<Label>>>,
-    owner: Weak<AppState>,
-}
-
-impl TerminalEntry {
-    fn new(id: TerminalId, terminal: Terminal, owner: Weak<AppState>) -> Rc<Self> {
-        let entry = Rc::new(TerminalEntry {
-            id,
-            terminal: terminal.clone(),
-            window_id: Cell::new(None),
-            flexible: Cell::new(true),
-            labels: RefCell::new(Vec::new()),
-            owner: owner.clone(),
-        });
-
-        let weak_owner = owner.clone();
-        terminal.connect_child_exited(move |_, _| {
-            if let Some(owner) = weak_owner.upgrade() {
-                owner.handle_terminal_exit(id);
-            }
-        });
-
-        let weak_entry = Rc::downgrade(&entry);
-        terminal.connect_window_title_notify(move |_| {
-            if let Some(entry) = weak_entry.upgrade() {
-                entry.refresh_labels();
-            }
-        });
-
-        let weak_entry = Rc::downgrade(&entry);
-        terminal.connect_current_directory_uri_notify(move |_| {
-            if let Some(entry) = weak_entry.upgrade() {
-                entry.refresh_labels();
-            }
-        });
-
-        entry
-    }
-
-    fn register_label(&self, label: &Label) {
-        self.labels
-            .borrow_mut()
-            .retain(|weak| weak.upgrade().is_some());
-        self.labels.borrow_mut().push(label.downgrade());
-        self.refresh_labels();
-    }
-
-    fn refresh_labels(&self) {
-        let flexible = self.flexible.get();
-        let text = format_terminal_title(&self.terminal, "Terminal", flexible);
-        self.labels.borrow_mut().retain(|weak| {
-            if let Some(label) = weak.upgrade() {
-                label.set_text(&text);
-                true
-            } else {
-                false
-            }
-        });
-
-        if let Some(owner) = self.owner.upgrade() {
-            owner.handle_terminal_title_changed(self.id);
-        }
-    }
-}
-
-#[allow(deprecated)]
-fn setup_terminal_theme(terminal: &Terminal) {
-    apply_terminal_theme(terminal);
-
-    terminal.connect_realize(|term| {
-        apply_terminal_theme(term);
-    });
-}
-
-#[allow(deprecated)]
-fn apply_terminal_theme(terminal: &Terminal) {
-    if let Some((fg, bg)) = widget_theme_colors(terminal) {
-        terminal.set_colors(Some(&fg), Some(&bg), &[]);
-        terminal.set_color_cursor(Some(&fg));
-        terminal.set_color_cursor_foreground(Some(&bg));
-        let highlight = mix_colors(&fg, &bg, 0.25);
-        terminal.set_color_highlight(Some(&highlight));
-        terminal.set_color_highlight_foreground(Some(&fg));
-    } else {
-        terminal.set_default_colors();
-    }
-}
-
-#[allow(deprecated)]
-fn widget_theme_colors<W: IsA<gtk4::Widget>>(widget: &W) -> Option<(RGBA, RGBA)> {
-    let widget_ref = widget.as_ref();
-    let context = widget_ref.style_context();
-
-    if let Some(colors) = colors_from_context(&context) {
-        return Some(colors);
-    }
-
-    if let Some(parent) = widget_ref.parent() {
-        return widget_theme_colors(&parent);
-    }
-
-    None
-}
-
-fn mix_colors(a: &RGBA, b: &RGBA, factor: f32) -> RGBA {
-    let inv = 1.0 - factor;
-    RGBA::new(
-        a.red() * factor + b.red() * inv,
-        a.green() * factor + b.green() * inv,
-        a.blue() * factor + b.blue() * inv,
-        a.alpha() * factor + b.alpha() * inv,
-    )
-}
-
-#[allow(deprecated)]
-#[allow(deprecated)]
-fn colors_from_context(context: &gtk4::StyleContext) -> Option<(RGBA, RGBA)> {
-    let fg = context
-        .lookup_color("theme_fg_color")
-        .or_else(|| context.lookup_color("window_fg_color"))
-        .or_else(|| context.lookup_color("view_fg_color"));
-    let bg = context
-        .lookup_color("theme_bg_color")
-        .or_else(|| context.lookup_color("window_bg_color"))
-        .or_else(|| context.lookup_color("view_bg_color"));
-
-    match (fg, bg) {
-        (Some(fg), Some(bg)) => Some((fg, bg)),
-        _ => None,
-    }
-}
 
 #[allow(deprecated)]
 fn ensure_custom_css() {
