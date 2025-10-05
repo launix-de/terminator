@@ -1,17 +1,14 @@
-//! Node behavior and traits for a cleaner OOP-like design in Rust.
-//! This module centralizes behavior for the layout tree nodes.
+//! Centralized LayoutNode tree operations.
+//!
+//! This module implements all behavior for the layout tree (`LayoutNode`),
+//! covering terminals, splits, and tab groups in one place. Keeping these
+//! operations here avoids duplication and makes the data model easier to reason about.
 
 use uuid::Uuid;
 use crate::model::{LayoutNode, TabGroup, InnerTab, TerminalLeaf, NodeId, TerminalId, InnerTabId, SplitNode, SplitOrientation};
 
-#[allow(dead_code)]
-pub trait NodeOps {
-    /// Returns true if this node (or any child) contains the given terminal id.
-    fn contains_terminal(&self, _id: TerminalId) -> bool { false }
-}
-
 impl LayoutNode {
-    pub(crate) fn as_tabs_mut(&mut self) -> Option<&mut TabGroup> {
+    pub(crate) fn as_tab_group_mut(&mut self) -> Option<&mut TabGroup> {
         match self {
             LayoutNode::Tabs(group) => Some(group),
             _ => None,
@@ -98,7 +95,7 @@ impl LayoutNode {
 
     // If there is a Tabs group that contains the target terminal, append a new inner tab to that group.
     // Returns true if a group was found and modified.
-    pub(crate) fn add_inner_to_group_containing(
+    pub(crate) fn add_inner_tab_to_group_containing_terminal(
         &mut self,
         target: TerminalId,
         new_inner_id: InnerTabId,
@@ -126,7 +123,7 @@ impl LayoutNode {
                     for inner in &mut group.tabs {
                         if inner
                             .root
-                            .add_inner_to_group_containing(target, new_inner_id, new_terminal_id)
+                            .add_inner_tab_to_group_containing_terminal(target, new_inner_id, new_terminal_id)
                         {
                             return true;
                         }
@@ -136,7 +133,7 @@ impl LayoutNode {
             }
             LayoutNode::Split(split) => {
                 for child in &mut split.children {
-                    if child.add_inner_to_group_containing(target, new_inner_id, new_terminal_id) {
+                    if child.add_inner_tab_to_group_containing_terminal(target, new_inner_id, new_terminal_id) {
                         return true;
                     }
                 }
@@ -149,7 +146,7 @@ impl LayoutNode {
     // Wrap the subtree that contains `target` into a Tabs group holding the existing subtree
     // and a new inner tab with `new_terminal_id`.
     // Returns true if a subtree was found and wrapped.
-    pub(crate) fn wrap_subtree_with_tabs_at(
+    pub(crate) fn wrap_subtree_containing_terminal_with_tabs(
         &mut self,
         target: TerminalId,
         new_inner_id: InnerTabId,
@@ -201,7 +198,7 @@ impl LayoutNode {
             }
             LayoutNode::Split(split) => {
                 for child in &mut split.children {
-                    if child.wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id) {
+                    if child.wrap_subtree_containing_terminal_with_tabs(target, new_inner_id, new_terminal_id) {
                         return true;
                     }
                 }
@@ -212,7 +209,7 @@ impl LayoutNode {
                     if inner.root.contains_terminal(target) {
                         if inner
                             .root
-                            .wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id)
+                            .wrap_subtree_containing_terminal_with_tabs(target, new_inner_id, new_terminal_id)
                         {
                             return true;
                         }
@@ -223,12 +220,12 @@ impl LayoutNode {
         }
     }
 
-    pub(crate) fn remove_inner_by_id_recursive(&mut self, inner_id: InnerTabId) -> bool {
+    pub(crate) fn remove_inner_tab_by_id_recursive(&mut self, inner_id: InnerTabId) -> bool {
         match self {
             LayoutNode::Terminal(_) => false,
             LayoutNode::Split(split) => {
                 for child in &mut split.children {
-                    if child.remove_inner_by_id_recursive(inner_id) {
+                    if child.remove_inner_tab_by_id_recursive(inner_id) {
                         return true;
                     }
                 }
@@ -255,7 +252,7 @@ impl LayoutNode {
                     true
                 } else {
                     for inner in &mut group.tabs {
-                        if inner.root.remove_inner_by_id_recursive(inner_id) {
+                        if inner.root.remove_inner_tab_by_id_recursive(inner_id) {
                             return true;
                         }
                     }
@@ -265,7 +262,7 @@ impl LayoutNode {
         }
     }
 
-    pub fn add_existing_terminal_to_group_by_inner_id(
+    pub fn add_existing_terminal_to_group_with_inner_id(
         &mut self,
         target_inner: InnerTabId,
         moving_terminal_id: TerminalId,
@@ -274,7 +271,7 @@ impl LayoutNode {
             LayoutNode::Terminal(_) => false,
             LayoutNode::Split(split) => {
                 for child in &mut split.children {
-                    if child.add_existing_terminal_to_group_by_inner_id(target_inner, moving_terminal_id) {
+                    if child.add_existing_terminal_to_group_with_inner_id(target_inner, moving_terminal_id) {
                         return true;
                     }
                 }
@@ -302,7 +299,7 @@ impl LayoutNode {
                     for inner in &mut group.tabs {
                         if inner
                             .root
-                            .add_existing_terminal_to_group_by_inner_id(target_inner, moving_terminal_id)
+                            .add_existing_terminal_to_group_with_inner_id(target_inner, moving_terminal_id)
                         {
                             return true;
                         }
@@ -414,7 +411,6 @@ impl LayoutNode {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn replace_leaf_with_split_existing(
         &mut self,
         target: TerminalId,

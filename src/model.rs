@@ -158,7 +158,6 @@ impl WorkspaceModel {
 
     // Move a terminal to split with a target terminal, creating a split at the target.
     // Returns true if the terminal was removed from its original location and inserted at target.
-    #[allow(dead_code)]
     pub fn move_terminal_to_split(
         &mut self,
         window_id: WindowId,
@@ -201,7 +200,6 @@ impl WorkspaceModel {
         replaced
     }
 
-    #[allow(dead_code)]
     /// Move an existing `terminal_id` into a brand new top-level tab in `window_id`.
     /// Returns the new tab id on success.
     pub fn move_terminal_to_new_tab(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<TabId> {
@@ -235,43 +233,7 @@ impl WorkspaceModel {
         Some(id)
     }
 
-    #[allow(dead_code)]
-    pub fn move_terminal_to_new_window(&mut self, terminal_id: TerminalId) -> Option<WindowId> {
-        // Remove from any existing window/tab
-        let mut removed = false;
-        for w in &mut self.windows {
-            if w.tabs.iter_mut().any(|t| t.remove_terminal(terminal_id)) {
-                removed = true;
-                break;
-            }
-        }
-        if !removed {
-            return None;
-        }
-        // Create new window with this terminal
-        let id = WindowId(Uuid::new_v4());
-        let leaf = TerminalLeaf {
-            node_id: NodeId(Uuid::new_v4()),
-            terminal_id,
-            title: String::from("Terminal"),
-            title_flexible: true,
-        };
-        let tab = TabModel {
-            id: TabId(Uuid::new_v4()),
-            root: LayoutNode::Terminal(leaf),
-            focus: terminal_id,
-            title: String::from("Terminal"),
-            title_flexible: true,
-            dynamic_title: String::new(),
-        };
-        self.windows.push(WindowModel {
-            id,
-            title: String::from("Terminator"),
-            tabs: vec![tab],
-            active_tab: 0,
-        });
-        Some(id)
-    }
+    
 
     pub fn close_tab(&mut self, window_id: WindowId, tab_id: TabId) -> bool {
         if let Some(widx) = self.windows.iter().position(|w| w.id == window_id) {
@@ -443,7 +405,7 @@ impl WorkspaceModel {
     ) -> bool {
         if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
             if let Some(tab) = window.tabs.iter_mut().find(|t| t.id == tab_id) {
-                if let Some(group) = tab.root.as_tabs_mut() {
+                if let Some(group) = tab.root.as_tab_group_mut() {
                     if let Some(inner) = group.tabs.iter_mut().find(|i| i.id == inner_id) {
                         inner.title = title;
                         inner.flexible = flexible;
@@ -473,7 +435,7 @@ impl WorkspaceModel {
         // 1) Prefer wrapping the exact subtree that contains the target into a Tabs group
         if tab
             .root
-            .wrap_subtree_with_tabs_at(from_terminal, inner_id, new_terminal_id)
+            .wrap_subtree_containing_terminal_with_tabs(from_terminal, inner_id, new_terminal_id)
         {
             tab.focus = new_terminal_id;
             return Some((inner_id, new_terminal_id));
@@ -483,7 +445,7 @@ impl WorkspaceModel {
         // append a new inner to that group (less precise, but acceptable fallback).
         if tab
             .root
-            .add_inner_to_group_containing(from_terminal, inner_id, new_terminal_id)
+            .add_inner_tab_to_group_containing_terminal(from_terminal, inner_id, new_terminal_id)
         {
             tab.focus = new_terminal_id;
             return Some((inner_id, new_terminal_id));
@@ -537,7 +499,7 @@ impl WorkspaceModel {
         let tab = &mut window.tabs[tab_index];
         if tab
             .root
-            .add_existing_terminal_to_group_by_inner_id(target_inner, moving)
+            .add_existing_terminal_to_group_with_inner_id(target_inner, moving)
         {
             tab.focus = moving;
             true
@@ -563,7 +525,7 @@ impl WorkspaceModel {
             if let Some(tab_idx) = window.tabs.iter().position(|t| t.id == tab_id) {
                 let tab = &mut window.tabs[tab_idx];
                 // First, try removing from a top-level Tabs group
-                if let Some(group) = tab.root.as_tabs_mut() {
+                if let Some(group) = tab.root.as_tab_group_mut() {
                     if let Some(idx) = group.tabs.iter().position(|i| i.id == inner_id) {
                         group.tabs.remove(idx);
                         changed = true;
@@ -586,7 +548,7 @@ impl WorkspaceModel {
                 }
                 // If not changed, try nested removal anywhere in the tree
                 if !changed {
-                    if tab.root.remove_inner_by_id_recursive(inner_id) {
+                    if tab.root.remove_inner_tab_by_id_recursive(inner_id) {
                         changed = true;
                         // Fix focus if it points to a removed terminal
                         if !tab.contains_terminal(tab.focus) {
@@ -740,555 +702,7 @@ impl TabModel {
     }
 }
 
-#[cfg(any())]
-impl LayoutNode {
-    fn as_tabs_mut(&mut self) -> Option<&mut TabGroup> {
-        match self {
-            LayoutNode::Tabs(group) => Some(group),
-            _ => None,
-        }
-    }
 
-    fn collect_terminal_ids(&self, out: &mut Vec<TerminalId>) {
-        match self {
-            LayoutNode::Terminal(leaf) => out.push(leaf.terminal_id),
-            LayoutNode::Split(split) => {
-                for child in &split.children {
-                    child.collect_terminal_ids(out);
-                }
-            }
-            LayoutNode::Tabs(group) => {
-                for inner in &group.tabs {
-                    inner.root.collect_terminal_ids(out);
-                }
-            }
-        }
-    }
-
-    fn first_terminal_id(&self) -> Option<TerminalId> {
-        match self {
-            LayoutNode::Terminal(leaf) => Some(leaf.terminal_id),
-            LayoutNode::Split(split) => split
-                .children
-                .iter()
-                .find_map(|child| child.first_terminal_id()),
-            LayoutNode::Tabs(group) => group
-                .tabs
-                .get(group.active)
-                .and_then(|inner| inner.root.first_terminal_id()),
-        }
-    }
-
-    fn last_terminal_id(&self) -> Option<TerminalId> {
-        match self {
-            LayoutNode::Terminal(leaf) => Some(leaf.terminal_id),
-            LayoutNode::Split(split) => split
-                .children
-                .iter()
-                .rev()
-                .find_map(|child| child.last_terminal_id()),
-            LayoutNode::Tabs(group) => group
-                .tabs
-                .get(group.active)
-                .and_then(|inner| inner.root.last_terminal_id()),
-        }
-    }
-
-    
-
-    // If there is a Tabs group that contains the target terminal, append a new inner tab to that group.
-    // Returns true if a group was found and modified.
-    fn add_inner_to_group_containing(
-        &mut self,
-        target: TerminalId,
-        new_inner_id: InnerTabId,
-        new_terminal_id: TerminalId,
-    ) -> bool {
-        match self {
-            LayoutNode::Tabs(group) => {
-                // Find the inner whose root contains target
-                if group.tabs.iter().any(|i| i.root.contains_terminal(target)) {
-                    let new_inner = InnerTab {
-                        id: new_inner_id,
-                        title: String::from("Terminal"),
-                        root: LayoutNode::Terminal(TerminalLeaf {
-                            node_id: NodeId(Uuid::new_v4()),
-                            terminal_id: new_terminal_id,
-                            title: String::from("Terminal"),
-                            title_flexible: true,
-                        }),
-                        focus: new_terminal_id,
-                        flexible: true,
-                    };
-                    group.tabs.push(new_inner);
-                    group.active = group.tabs.len() - 1;
-                    true
-                } else {
-                    // Recurse into inners
-                    for inner in &mut group.tabs {
-                        if inner
-                            .root
-                            .add_inner_to_group_containing(target, new_inner_id, new_terminal_id)
-                        {
-                            return true;
-                        }
-                    }
-                    false
-                }
-            }
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.add_inner_to_group_containing(target, new_inner_id, new_terminal_id) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Terminal(_) => false,
-        }
-    }
-
-    // Wrap the subtree that contains `target` into a Tabs group holding the existing subtree
-    // and a new inner tab with `new_terminal_id`.
-    // Returns true if a subtree was found and wrapped.
-    fn wrap_subtree_with_tabs_at(
-        &mut self,
-        target: TerminalId,
-        new_inner_id: InnerTabId,
-        new_terminal_id: TerminalId,
-    ) -> bool {
-        match self {
-            LayoutNode::Terminal(leaf) => {
-                if leaf.terminal_id == target {
-                    let orig_term = leaf.terminal_id;
-                    let existing = std::mem::replace(
-                        self,
-                        LayoutNode::Tabs(TabGroup {
-                            node_id: NodeId(Uuid::new_v4()),
-                            tabs: Vec::new(),
-                            active: 0,
-                        }),
-                    );
-                    if let LayoutNode::Tabs(group) = self {
-                        // First inner: existing subtree
-                        let first_terminal = existing.first_terminal_id().unwrap_or(orig_term);
-                        let first_inner = InnerTab {
-                            id: InnerTabId(Uuid::new_v4()),
-                            title: String::from("Terminal"),
-                            root: existing,
-                            focus: first_terminal,
-                            flexible: true,
-                        };
-                        // Second inner: the new terminal
-                        let second_inner = InnerTab {
-                            id: new_inner_id,
-                            title: String::from("Terminal"),
-                            root: LayoutNode::Terminal(TerminalLeaf {
-                                node_id: NodeId(Uuid::new_v4()),
-                                terminal_id: new_terminal_id,
-                                title: String::from("Terminal"),
-                                title_flexible: true,
-                            }),
-                            focus: new_terminal_id,
-                            flexible: true,
-                        };
-                        group.tabs.push(first_inner);
-                        group.tabs.push(second_inner);
-                        group.active = 1;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Tabs(group) => {
-                // Find the inner containing the target and wrap inside it
-                for inner in &mut group.tabs {
-                    if inner.root.contains_terminal(target) {
-                        if inner
-                            .root
-                            .wrap_subtree_with_tabs_at(target, new_inner_id, new_terminal_id)
-                        {
-                            // Keep the active as-is or set to the inner that was modified
-                            // so UI reflects the change. Move focus inside parent Tabs handled by caller.
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    // Remove an inner tab by id anywhere in this subtree. Returns true if removed.
-    fn remove_inner_by_id_recursive(&mut self, inner_id: InnerTabId) -> bool {
-        match self {
-            LayoutNode::Terminal(_) => false,
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.remove_inner_by_id_recursive(inner_id) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Tabs(group) => {
-                if let Some(idx) = group.tabs.iter().position(|i| i.id == inner_id) {
-                    group.tabs.remove(idx);
-                    if group.tabs.is_empty() {
-                        // Replace with an empty split placeholder; caller may collapse further.
-                        *self = LayoutNode::Split(SplitNode {
-                            node_id: NodeId(Uuid::new_v4()),
-                            orientation: SplitOrientation::Vertical,
-                            children: Vec::new(),
-                        });
-                    } else {
-                        // Keep Tabs even when one inner remains; update active index accordingly
-                        if idx == 0 {
-                            group.active = 0;
-                        } else if idx - 1 < group.tabs.len() {
-                            group.active = idx - 1;
-                        } else {
-                            group.active = group.tabs.len() - 1;
-                        }
-                    }
-                    true
-                } else {
-                    for inner in &mut group.tabs {
-                        if inner.root.remove_inner_by_id_recursive(inner_id) {
-                            return true;
-                        }
-                    }
-                    false
-                }
-            }
-        }
-    }
-
-    // Add a new inner tab to the Tabs group that contains the given inner id, using an existing
-    // terminal id as the sole child of that new inner. Returns true if inserted.
-    pub fn add_existing_terminal_to_group_by_inner_id(
-        &mut self,
-        target_inner: InnerTabId,
-        moving_terminal_id: TerminalId,
-    ) -> bool {
-        match self {
-            LayoutNode::Terminal(_) => false,
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.add_existing_terminal_to_group_by_inner_id(target_inner, moving_terminal_id) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Tabs(group) => {
-                // Is this the group that contains the target inner id?
-                let contains_target = group.tabs.iter().any(|i| i.id == target_inner);
-                if contains_target {
-                    let new_inner = InnerTab {
-                        id: InnerTabId(Uuid::new_v4()),
-                        title: String::from("Terminal"),
-                        root: LayoutNode::Terminal(TerminalLeaf {
-                            node_id: NodeId(Uuid::new_v4()),
-                            terminal_id: moving_terminal_id,
-                            title: String::from("Terminal"),
-                            title_flexible: true,
-                        }),
-                        focus: moving_terminal_id,
-                        flexible: true,
-                    };
-                    group.tabs.push(new_inner);
-                    group.active = group.tabs.len() - 1;
-                    true
-                } else {
-                    for inner in &mut group.tabs {
-                        if inner
-                            .root
-                            .add_existing_terminal_to_group_by_inner_id(target_inner, moving_terminal_id)
-                        {
-                            return true;
-                        }
-                    }
-                    false
-                }
-            }
-        }
-    }
-
-    fn find_adjacent_terminal(
-        &self,
-        target: TerminalId,
-        orientation: SplitOrientation,
-        forward: bool,
-    ) -> Option<TerminalId> {
-        match self {
-            LayoutNode::Terminal(_) => None,
-            LayoutNode::Split(split) => {
-                for (index, child) in split.children.iter().enumerate() {
-                    if child.contains_terminal(target) {
-                        // Prefer adjacent lookup inside the containing child first; this
-                        // makes nested splits of the same orientation behave as if merged.
-                        if let Some(inner) = child.find_adjacent_terminal(target, orientation, forward) {
-                            return Some(inner);
-                        }
-                        // Otherwise, fallback to sibling at this level when orientation matches
-                        if split.orientation == orientation {
-                            if forward {
-                                if let Some(next_child) = split.children.get(index + 1) {
-                                    return next_child.first_terminal_id();
-                                }
-                            } else if index > 0 {
-                                if let Some(prev_child) = split.children.get(index - 1) {
-                                    return prev_child.last_terminal_id();
-                                }
-                            }
-                        }
-                        return None;
-                    }
-                }
-                None
-            }
-            LayoutNode::Tabs(group) => {
-                for inner in &group.tabs {
-                    if inner.root.contains_terminal(target) {
-                        return inner
-                            .root
-                            .find_adjacent_terminal(target, orientation, forward);
-                    }
-                }
-                None
-            }
-        }
-    }
-
-    fn replace_leaf_with_split(
-        &mut self,
-        target: TerminalId,
-        orientation: SplitOrientation,
-        new_terminal_id: TerminalId,
-    ) -> bool {
-        match self {
-            LayoutNode::Terminal(leaf) => {
-                if leaf.terminal_id == target {
-                    let existing = std::mem::replace(
-                        self,
-                        LayoutNode::Split(SplitNode {
-                            node_id: NodeId(Uuid::new_v4()),
-                            orientation,
-                            children: Vec::new(),
-                        }),
-                    );
-                    if let LayoutNode::Split(split_node) = self {
-                        let existing_leaf = existing;
-                        let new_leaf = LayoutNode::Terminal(TerminalLeaf {
-                            node_id: NodeId(Uuid::new_v4()),
-                            terminal_id: new_terminal_id,
-                            title: String::from("Terminal"),
-                            title_flexible: true,
-                        });
-                        // Order: keep existing first, then new one
-                        split_node.children.push(existing_leaf);
-                        split_node.children.push(new_leaf);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.replace_leaf_with_split(target, orientation, new_terminal_id) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Tabs(group) => {
-                for (idx, inner) in group.tabs.iter_mut().enumerate() {
-                    if inner
-                        .root
-                        .replace_leaf_with_split(target, orientation, new_terminal_id)
-                    {
-                        group.active = idx;
-                        return true;
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    // Replace the target leaf with a split, using an existing terminal id as the new sibling.
-    #[allow(dead_code)]
-    fn replace_leaf_with_split_existing(
-        &mut self,
-        target: TerminalId,
-        orientation: SplitOrientation,
-        moving_terminal_id: TerminalId,
-    ) -> bool {
-        match self {
-            LayoutNode::Terminal(leaf) => {
-                if leaf.terminal_id == target {
-                    let existing = std::mem::replace(
-                        self,
-                        LayoutNode::Split(SplitNode {
-                            node_id: NodeId(Uuid::new_v4()),
-                            orientation,
-                            children: Vec::new(),
-                        }),
-                    );
-                    if let LayoutNode::Split(split_node) = self {
-                        let existing_leaf = existing;
-                        let new_leaf = LayoutNode::Terminal(TerminalLeaf {
-                            node_id: NodeId(Uuid::new_v4()),
-                            terminal_id: moving_terminal_id,
-                            title: String::from("Terminal"),
-                            title_flexible: true,
-                        });
-                        split_node.children.push(existing_leaf);
-                        split_node.children.push(new_leaf);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            LayoutNode::Split(split) => {
-                for child in &mut split.children {
-                    if child.replace_leaf_with_split_existing(
-                        target,
-                        orientation,
-                        moving_terminal_id,
-                    ) {
-                        return true;
-                    }
-                }
-                false
-            }
-            LayoutNode::Tabs(group) => {
-                for (idx, inner) in group.tabs.iter_mut().enumerate() {
-                    if inner
-                        .root
-                        .replace_leaf_with_split_existing(target, orientation, moving_terminal_id)
-                    {
-                        group.active = idx;
-                        return true;
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    /// Remove the terminal `target` from this subtree.
-    ///
-    /// Returns `true` if a terminal was removed anywhere under this node, `false` otherwise.
-    fn remove_terminal(&mut self, target: TerminalId) -> bool {
-        match self {
-            // Leaf: remove only if it matches; otherwise nothing to do.
-            LayoutNode::Terminal(leaf) => {
-                if leaf.terminal_id == target {
-                    // Replace the leaf with an empty split placeholder so callers can detect emptiness
-                    *self = LayoutNode::Split(SplitNode {
-                        node_id: NodeId(Uuid::new_v4()),
-                        orientation: SplitOrientation::Vertical,
-                        children: Vec::new(),
-                    });
-                    true
-                } else {
-                    false
-                }
-            }
-            LayoutNode::Split(split) => {
-                let mut removed_any = false;
-                // First, attempt removal inside each child (do not drop children based on return values)
-                for child in &mut split.children {
-                    if child.remove_terminal(target) {
-                        removed_any = true;
-                    }
-                }
-
-                // Then, explicitly drop any terminal children that match the target (in case of direct children)
-                split.children
-                    .retain(|child| !matches!(child, LayoutNode::Terminal(leaf) if leaf.terminal_id == target));
-
-                // Also drop any children that became empty as a result of recursive removals
-                split.children.retain(|child| !child.is_empty());
-
-                // Collapse degenerate split nodes
-                match split.children.len() {
-                    0 => {
-                        // Entire split is empty now
-                        // Keep as empty split; higher-level callers may collapse further
-                    }
-                    1 => {
-                        let only = split.children.remove(0);
-                        *self = only;
-                    }
-                    _ => {}
-                }
-
-                removed_any
-            }
-            LayoutNode::Tabs(group) => {
-                // Find the inner that contains the target and attempt removal inside it
-                if let Some(idx) = group
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, inner)| if inner.root.contains_terminal(target) { Some(idx) } else { None })
-                {
-                    let inner = &mut group.tabs[idx];
-                    let removed = inner.root.remove_terminal(target);
-                    // If the inner became empty after removal, drop it and adjust active index
-                    if inner.root.is_empty() {
-                        group.tabs.remove(idx);
-                        if group.tabs.is_empty() {
-                            // Replace whole Tabs with an empty split placeholder
-                            *self = LayoutNode::Split(SplitNode {
-                                node_id: NodeId(Uuid::new_v4()),
-                                orientation: SplitOrientation::Vertical,
-                                children: Vec::new(),
-                            });
-                        } else {
-                            if group.active >= group.tabs.len() {
-                                group.active = group.tabs.len() - 1;
-                            } else if group.active == idx && idx > 0 {
-                                group.active = idx - 1;
-                            }
-                        }
-                    }
-                    removed
-                } else {
-                    false
-                }
-            }
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        match self {
-            LayoutNode::Terminal(_) => false,
-            LayoutNode::Split(split) => split.children.is_empty(),
-            LayoutNode::Tabs(group) => group.tabs.is_empty(),
-        }
-    }
-}
 
 impl InnerTab {
     pub fn display_title(&self) -> String {

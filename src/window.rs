@@ -1,15 +1,10 @@
-//! Window-level helpers and controller abstractions.
+//! Terminal registry and window-level helpers.
 use std::{cell::{Cell, RefCell}, rc::{Rc, Weak}, collections::HashMap};
 use gtk4::{prelude::*, Label};
 use gtk4::gdk::RGBA;
 use vte4::Terminal;
 use vte4::prelude::*;
 use crate::model::{WindowId, TerminalId};
-
-#[allow(dead_code)]
-pub trait WindowOps {
-    fn title(&self) -> String;
-}
 
 pub struct TerminalRegistry {
     entries: HashMap<TerminalId, Rc<TerminalEntry>>,

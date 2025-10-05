@@ -466,8 +466,9 @@ impl AppState {
         }
     }
 
-    // Ctrl+Shift+T: Open a new tab in the closest Tabs group if the focused terminal is inside one,
-    // otherwise open a new top-level tab.
+    // Contextual helper: open a new inner tab in the closest Tabs group if the focused
+    // terminal is inside one; otherwise open a new top-level tab.
+    #[allow(dead_code)]
     fn new_tab_contextual(self: &Rc<Self>, window_id: WindowId) {
         // Determine current tab and focused terminal
         let current_tab = self.current_tab_id(window_id);
@@ -913,15 +914,7 @@ struct WorkspaceController {
 }
 
 impl WorkspaceController {
-    #[allow(dead_code)]
-    fn claim_primary_drag(widget: &impl IsA<Widget>) {
-        let cap_drag = GestureDrag::new();
-        cap_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        cap_drag.connect_drag_begin(|g, _, _| {
-            g.set_state(gtk4::EventSequenceState::Claimed);
-        });
-        widget.add_controller(cap_drag);
-    }
+    
 
     // Attach a DragSource that produces a resource descriptor (payload) for moves.
     // The payload is a String consumed by DropTargets and parsed via DragPayload.
@@ -961,15 +954,23 @@ impl WorkspaceController {
         }
     }
 
-    #[allow(dead_code)]
-    fn for_each_child(root: &Widget, f: &mut dyn FnMut(&Widget)) {
-        f(root);
-        let mut child = root.first_child();
-        while let Some(c) = child {
-            Self::for_each_child(&c, f);
-            child = c.next_sibling();
-        }
+    fn setup_esc_cancel(self: &Rc<Self>) {
+        // Allow ESC to cancel any in-progress drag preview
+        let key = gtk4::EventControllerKey::new();
+        let weak: std::rc::Weak<WorkspaceController> = Rc::downgrade(self);
+        key.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk4::gdk::Key::Escape {
+                if let Some(controller) = weak.upgrade() {
+                    controller.hide_preview();
+                    return true.into();
+                }
+            }
+            false.into()
+        });
+        self.overlay.add_controller(key);
     }
+
+    
 
 
     #[allow(deprecated)]
@@ -1208,6 +1209,7 @@ impl WorkspaceController {
 
         controller.install_actions();
         controller.setup_callbacks();
+        controller.setup_esc_cancel();
         controller.rebuild();
 
         // We adjust tab label widths on rebuild; hook to size changes can be added if needed.
@@ -1252,7 +1254,8 @@ impl WorkspaceController {
         new_tab.connect_activate(move |_, _| {
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    state.new_tab_contextual(controller.window_id);
+                    // Ctrl+Shift+T should open a top-level tab
+                    state.new_tab(controller.window_id);
                 }
             }
         });
@@ -2224,7 +2227,18 @@ impl WorkspaceController {
                                 false
                             }
                         };
-                        let menu = build_context_menu(&bindings, show_close_inner);
+                        // Show New Inner Tab only when there's at least one Tabs group in the current tab tree
+                        let show_new_inner = {
+                            let ws = state.workspace.borrow();
+                        let window = ws.windows.iter().find(|w| w.id == controller.window_id);
+                        if let Some(window) = window {
+                            let tab = window.tabs.get(window.active_tab);
+                                if let Some(tab) = tab {
+                                    matches!(tab.root, LayoutNode::Tabs(_))
+                                } else { false }
+                            } else { false }
+                        };
+                        let menu = build_context_menu(&bindings, show_close_inner, show_new_inner);
                         let popover = PopoverMenu::from_model(Some(&menu));
                         popover.set_has_arrow(false);
                         popover.set_parent(&term_clone);
@@ -2558,7 +2572,7 @@ paned > separator, paned separator {
     });
 }
 
-fn build_context_menu(bindings: &KeybindingMap, show_close_inner: bool) -> gio::Menu {
+fn build_context_menu(bindings: &KeybindingMap, show_close_inner: bool, show_new_inner: bool) -> gio::Menu {
     use ActionId::*;
 
     let menu = gio::Menu::new();
@@ -2570,7 +2584,9 @@ fn build_context_menu(bindings: &KeybindingMap, show_close_inner: bool) -> gio::
     let layout = gio::Menu::new();
     layout.append_item(&menu_item(NewWindow, "term.new_window", bindings));
     layout.append_item(&menu_item(NewTab, "term.new_tab", bindings));
-    layout.append_item(&menu_item(NewInnerTab, "term.new_inner_tab", bindings));
+    if show_new_inner {
+        layout.append_item(&menu_item(NewInnerTab, "term.new_inner_tab", bindings));
+    }
     layout.append_item(&menu_item(SplitHorizontal, "term.split_h", bindings));
     layout.append_item(&menu_item(SplitVertical, "term.split_v", bindings));
 
@@ -5113,8 +5129,8 @@ mod gui_tests {
     }
 
     #[test]
-    fn gui_ctrl_shift_t_prefers_closest_inner_tabs() {
-        // Build a layout with inner tabs and ensure contextual new-tab adds to inner group
+    fn gui_contextual_new_tab_prefers_closest_inner_tabs() {
+        // Build a layout with inner tabs and ensure contextual helper adds to inner group
         run_gui_test("new_tab_contextual_inner", |state, window_id| {
             pump_events();
 
@@ -5150,7 +5166,7 @@ mod gui_tests {
                 (window.tabs.len(), inner_count)
             };
 
-            // Invoke contextual new tab (equivalent to Ctrl+Shift+T)
+            // Invoke contextual helper (not bound to Ctrl+Shift+T)
             state.new_tab_contextual(window_id);
             pump_events();
 
