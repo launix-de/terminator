@@ -740,6 +740,7 @@ impl TabModel {
     }
 }
 
+#[cfg(any())]
 impl LayoutNode {
     fn as_tabs_mut(&mut self) -> Option<&mut TabGroup> {
         match self {
@@ -793,38 +794,7 @@ impl LayoutNode {
         }
     }
 
-    pub fn contains_terminal(&self, id: TerminalId) -> bool {
-        match self {
-            LayoutNode::Terminal(leaf) => leaf.terminal_id == id,
-            LayoutNode::Split(split) => split.children.iter().any(|c| c.contains_terminal(id)),
-            LayoutNode::Tabs(group) => group.tabs.iter().any(|i| i.root.contains_terminal(id)),
-        }
-    }
-
-    pub fn find_inner_id_for_terminal(&self, target: TerminalId) -> Option<InnerTabId> {
-        match self {
-            LayoutNode::Terminal(_) => None,
-            LayoutNode::Split(split) => {
-                for child in &split.children {
-                    if let Some(id) = child.find_inner_id_for_terminal(target) {
-                        return Some(id);
-                    }
-                }
-                None
-            }
-            LayoutNode::Tabs(group) => {
-                for inner in &group.tabs {
-                    if inner.root.contains_terminal(target) {
-                        return Some(inner.id);
-                    }
-                    if let Some(id) = inner.root.find_inner_id_for_terminal(target) {
-                        return Some(id);
-                    }
-                }
-                None
-            }
-        }
-    }
+    
 
     // If there is a Tabs group that contains the target terminal, append a new inner tab to that group.
     // Returns true if a group was found and modified.

@@ -1,5 +1,8 @@
 mod model;
 mod ui;
+mod tabs;
+mod node;
+mod split;
 
 use crate::model::{
     ActionId, FocusDirection, InnerTab, InnerTabId, KeybindingMap, LayoutNode, SplitNode,
@@ -7,10 +10,11 @@ use crate::model::{
     WorkspaceModel,
 };
 use crate::ui::{EditableTabLabel, EditableTitleBar};
+use crate::tabs::build_tab_label;
 use glib::signal::{signal_handler_block, signal_handler_unblock};
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, Entry, EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, DragSource,
-    HeaderBar, Image, Label, ListBox, ListBoxRow, Notebook, Orientation, Paned, PopoverMenu,
+    Application, ApplicationWindow, Box, Entry, EventControllerFocus, EventControllerMotion, GestureClick, GestureDrag, DragSource,
+    HeaderBar, Label, ListBox, ListBoxRow, Notebook, Orientation, Paned, PopoverMenu,
     ResponseType, Widget,
     gdk::{RGBA, Rectangle},
     gio, glib,
@@ -1905,15 +1909,7 @@ impl WorkspaceController {
                 inner.display_title()
             };
 
-            let inner_label = EditableTabLabel::new(initial_title, inner.is_title_flexible());
-            let label_box = Box::new(Orientation::Horizontal, 6);
-            let label_widget = inner_label.widget();
-            label_box.append(&label_widget);
-            let close_btn = Button::new();
-            close_btn.add_css_class("flat");
-            let img = Image::from_icon_name("window-close-symbolic");
-            close_btn.set_child(Some(&img));
-            label_box.append(&close_btn);
+            let (label_box, inner_label, close_btn) = build_tab_label(initial_title, inner.is_title_flexible());
 
             // Prevent close button from stealing focus or triggering tab switch before close
             close_btn.set_focus_on_click(false);
@@ -2078,15 +2074,7 @@ impl WorkspaceController {
             page.set_hexpand(true);
             page.set_vexpand(true);
 
-            let tab_label = EditableTabLabel::new(tab.display_title(), tab.is_title_flexible());
-            let label_widget = tab_label.widget();
-            let label_box = Box::new(Orientation::Horizontal, 6);
-            label_box.append(&label_widget);
-            let close_btn = Button::new();
-            close_btn.add_css_class("flat");
-            let img = Image::from_icon_name("window-close-symbolic");
-            close_btn.set_child(Some(&img));
-            label_box.append(&close_btn);
+            let (label_box, tab_label, close_btn) = build_tab_label(tab.display_title(), tab.is_title_flexible());
 
             // Do not claim drags on top-level tab labels to avoid interfering with tab switching
 
