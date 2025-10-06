@@ -119,6 +119,11 @@ pub struct InnerTab {
 }
 
 impl WorkspaceModel {
+    pub fn parent_split_id_of_terminal(&self, window_id: WindowId, tab_id: TabId, terminal: TerminalId) -> Option<NodeId> {
+        let window = self.windows.iter().find(|w| w.id == window_id)?;
+        let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
+        tab.root.find_parent_split_id_of_terminal(terminal)
+    }
     pub fn new_single_terminal() -> Self {
         let window_id = WindowId(Uuid::new_v4());
         let (tab, _term_id) = TabModel::single_terminal_tab();
@@ -134,6 +139,7 @@ impl WorkspaceModel {
         }
     }
 
+    
     pub fn add_window(&mut self) -> WindowId {
         let id = WindowId(Uuid::new_v4());
         let (tab, _term) = TabModel::single_terminal_tab();
@@ -158,6 +164,7 @@ impl WorkspaceModel {
 
     // Move a terminal to split with a target terminal, creating a split at the target.
     // Returns true if the terminal was removed from its original location and inserted at target.
+    #[allow(dead_code)]
     pub fn move_terminal_to_split(
         &mut self,
         window_id: WindowId,
@@ -165,32 +172,26 @@ impl WorkspaceModel {
         target: TerminalId,
         orientation: SplitOrientation,
     ) -> bool {
+        // Remove moving terminal from any window/tab first
+        let mut removed = false;
+        for w in &mut self.windows {
+            if w.tabs.iter_mut().any(|t| t.remove_terminal(moving)) {
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return false;
+        }
+        // Find target window/tab
         let window = match self.windows.iter_mut().find(|w| w.id == window_id) {
             Some(w) => w,
             None => return false,
         };
-
-        // Find the index of the tab containing the target first to avoid overlapping borrows.
-        let tab_index = match window
-            .tabs
-            .iter()
-            .position(|t| t.contains_terminal(target))
-        {
-            Some(i) => i,
+        let tab = match window.tabs.iter_mut().find(|t| t.contains_terminal(target)) {
+            Some(t) => t,
             None => return false,
         };
-
-        // Remove moving terminal from wherever it is within this window
-        let removed = window
-            .tabs
-            .iter_mut()
-            .any(|t| t.remove_terminal(moving));
-        if !removed {
-            return false;
-        }
-
-        // Now operate on the previously found tab by index
-        let tab = &mut window.tabs[tab_index];
         let replaced = tab
             .root
             .replace_leaf_with_split_existing(target, orientation, moving);
@@ -200,19 +201,62 @@ impl WorkspaceModel {
         replaced
     }
 
+    /// Like move_terminal_to_split but allows choosing whether the moved terminal should be
+    /// inserted before (left/top) or after (right/bottom) the existing target.
+    pub fn move_terminal_to_split_at_side(
+        &mut self,
+        window_id: WindowId,
+        moving: TerminalId,
+        target: TerminalId,
+        orientation: SplitOrientation,
+        insert_first: bool,
+    ) -> bool {
+        // Remove moving terminal from any window/tab first
+        let mut removed = false;
+        for w in &mut self.windows {
+            if w.tabs.iter_mut().any(|t| t.remove_terminal(moving)) {
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return false;
+        }
+
+        // Find target window/tab
+        let window = match self.windows.iter_mut().find(|w| w.id == window_id) {
+            Some(w) => w,
+            None => return false,
+        };
+        let tab = match window.tabs.iter_mut().find(|t| t.contains_terminal(target)) {
+            Some(t) => t,
+            None => return false,
+        };
+        let replaced = tab
+            .root
+            .replace_leaf_with_split_existing_ordered(target, orientation, moving, insert_first);
+        if replaced {
+            tab.set_focus_terminal(moving);
+        }
+        replaced
+    }
+
     /// Move an existing `terminal_id` into a brand new top-level tab in `window_id`.
     /// Returns the new tab id on success.
     pub fn move_terminal_to_new_tab(&mut self, window_id: WindowId, terminal_id: TerminalId) -> Option<TabId> {
-        let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
-        // Remove from any tab
-        let removed = window
-            .tabs
-            .iter_mut()
-            .any(|t| t.remove_terminal(terminal_id));
+        // Remove from any window/tab first
+        let mut removed = false;
+        for w in &mut self.windows {
+            if w.tabs.iter_mut().any(|t| t.remove_terminal(terminal_id)) {
+                removed = true;
+                break;
+            }
+        }
         if !removed {
             return None;
         }
-        // Create new tab with that terminal as single root
+        // Create new tab with that terminal as single root in target window
+        let window = self.windows.iter_mut().find(|w| w.id == window_id)?;
         let leaf = TerminalLeaf {
             node_id: NodeId(Uuid::new_v4()),
             terminal_id,
@@ -482,21 +526,25 @@ impl WorkspaceModel {
         target_inner: InnerTabId,
         moving: TerminalId,
     ) -> bool {
+        // Remove moving from any window/tab first
+        let mut removed = false;
+        for w in &mut self.windows {
+            if w.tabs.iter_mut().any(|t| t.remove_terminal(moving)) {
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return false;
+        }
         let window = match self.windows.iter_mut().find(|w| w.id == window_id) {
             Some(w) => w,
             None => return false,
         };
-        // Find the tab index first to avoid overlapping borrows
-        let tab_index = match window.tabs.iter().position(|t| t.id == tab_id) {
-            Some(i) => i,
+        let tab = match window.tabs.iter_mut().find(|t| t.id == tab_id) {
+            Some(t) => t,
             None => return false,
         };
-        // Remove moving from any tab in this window
-        let removed = window.tabs.iter_mut().any(|t| t.remove_terminal(moving));
-        if !removed {
-            return false;
-        }
-        let tab = &mut window.tabs[tab_index];
         if tab
             .root
             .add_existing_terminal_to_group_with_inner_id(target_inner, moving)
@@ -1164,6 +1212,46 @@ impl TabModel {
             };
             group.tabs.push(inner);
             group.active = 0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_split_side {
+    use super::*;
+    fn setup() -> (WorkspaceModel, WindowId, TabId, TerminalId) {
+        let ws = WorkspaceModel::new_single_terminal();
+        let window_id = ws.windows[0].id;
+        let tab_id = ws.windows[0].tabs[0].id;
+        let term = ws.windows[0].tabs[0].focus;
+        (ws, window_id, tab_id, term)
+    }
+
+    #[test]
+    fn splitting_bottom_of_two_verticals_results_in_nested_vertical() {
+        let (mut ws, window_id, _tab_id, first) = setup();
+        // Create bottom via vertical split
+        let bottom = ws
+            .split_terminal(window_id, first, SplitOrientation::Vertical)
+            .expect("vsplit created");
+        // Now split bottom vertically again (nested vertical split)
+        let _new = ws
+            .split_terminal(window_id, bottom, SplitOrientation::Vertical)
+            .expect("second vertical split at bottom");
+        let tab = &ws.windows[0].tabs[0];
+        match &tab.root {
+            LayoutNode::Split(outer) => {
+                assert_eq!(outer.orientation, SplitOrientation::Vertical);
+                assert_eq!(outer.children.len(), 2);
+                match &outer.children[1] {
+                    LayoutNode::Split(inner) => {
+                        assert_eq!(inner.orientation, SplitOrientation::Vertical);
+                        assert_eq!(inner.children.len(), 2);
+                    }
+                    other => panic!("expected nested split at bottom, got {:?}", other),
+                }
+            }
+            other => panic!("expected split root, got {:?}", other),
         }
     }
 }

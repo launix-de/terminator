@@ -7,7 +7,7 @@ mod window;
 
 use crate::model::{
     ActionId, FocusDirection, InnerTab, InnerTabId, KeybindingMap, LayoutNode, SplitNode,
-    SplitOrientation, TabGroup, TabId, TabModel, TerminalId, TerminalLeaf, WindowId, WindowModel,
+    SplitOrientation, TabGroup, TabId, TabModel, TerminalId, TerminalLeaf, WindowId, WindowModel, NodeId,
     WorkspaceModel,
 };
 use crate::ui::{EditableTabLabel, EditableTitleBar};
@@ -22,6 +22,8 @@ use gtk4::{
     gio, glib,
     prelude::*,
 };
+#[allow(unused_imports)]
+use glib::clone;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::{
@@ -32,6 +34,17 @@ thread_local! {
     static CUSTOM_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = RefCell::new(None);
 }
 use vte4::{Format, PtyFlags, Terminal, prelude::*};
+
+// Custom boxed type for DnD payload to avoid using plain strings
+#[derive(Clone, Debug, glib::Boxed)]
+#[boxed_type(name = "TerminatorDragPayload")]
+#[allow(dead_code)]
+struct DragData {
+    window: WindowId,
+    tab: Option<TabId>,
+    inner: Option<InnerTabId>,
+    terminal: TerminalId,
+}
 
 const ACTION_DEFS: &[(ActionId, &str)] = &[
     (ActionId::Copy, "Copy"),
@@ -52,53 +65,15 @@ const ACTION_DEFS: &[(ActionId, &str)] = &[
     (ActionId::PrevTab, "Previous Tab"),
 ];
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct DragPayload {
-    window: WindowId,
-    tab: Option<TabId>,
-    inner: Option<InnerTabId>,
-    terminal: TerminalId,
-    src: Option<String>,
-}
-
-impl DragPayload {
-    fn parse_uuid(s: &str) -> Option<uuid::Uuid> {
-        uuid::Uuid::parse_str(s.trim_matches(|c| c == '"')).ok()
-    }
-}
-
-impl TryFrom<&str> for DragPayload {
-    type Error = ();
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let mut window = None;
-        let mut tab = None;
-        let mut inner = None;
-        let mut terminal = None;
-        let mut src: Option<String> = None;
-        for part in s.split_whitespace() {
-            if let Some((k, v)) = part.split_once('=') {
-                match k {
-                    "window" => window = Self::parse_uuid(v).map(WindowId),
-                    "tab" => tab = Self::parse_uuid(v).map(TabId),
-                    "inner" => inner = Self::parse_uuid(v).map(InnerTabId),
-                    "terminal" => terminal = Self::parse_uuid(v).map(TerminalId),
-                    "src" => src = Some(v.trim_matches(|c| c == '"').to_string()),
-                    _ => {}
-                }
-            }
-        }
-        match (window, terminal) {
-            (Some(window), Some(terminal)) => Ok(DragPayload { window, tab, inner, terminal, src }),
-            _ => Err(())
-        }
-    }
+// Helper to construct a payload
+fn dnd_payload(window: WindowId, tab: Option<TabId>, inner: Option<InnerTabId>, terminal: TerminalId) -> DragData {
+    DragData { window, tab, inner, terminal }
 }
 
 fn main() -> gtk4::glib::ExitCode {
     let app = Application::builder()
         .application_id("dev.gnome.Terminator2")
-        .flags(gio::ApplicationFlags::empty())
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
     ensure_custom_css();
@@ -114,6 +89,13 @@ fn main() -> gtk4::glib::ExitCode {
         controllers: RefCell::new(HashMap::new()),
         last_focus: RefCell::new(HashMap::new()),
         creating_op: Cell::new(false),
+        activated_once: Cell::new(false),
+        last_window: Cell::new(None),
+        pending_window_title: RefCell::new(None),
+        pending_maximize: Cell::new(false),
+        pending_fullscreen: Cell::new(false),
+        pending_exec: RefCell::new(None),
+        pending_wait: Cell::new(false),
     });
 
     state.install_theme_listener();
@@ -123,9 +105,163 @@ fn main() -> gtk4::glib::ExitCode {
         state_activate.on_activate(app);
     });
 
+    let state_cmd = state.clone();
+    app.connect_command_line(move |app, cmd| {
+        let args: Vec<String> = cmd
+            .arguments()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        match parse_cli(&args) {
+            Ok(req) => {
+                if req.help {
+                    println!("{}", cli_usage());
+                    return 0.into();
+                }
+                if req.version {
+                    println!("terminator2 {}", env!("CARGO_PKG_VERSION"));
+                    return 0.into();
+                }
+                state_cmd.handle_cli_request(app, req);
+                0.into()
+            }
+            Err(e) => {
+                eprintln!("Error: {}\n\n{}", e, cli_usage());
+                2.into()
+            }
+        }
+    });
+
     app.run()
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+struct CliRequest {
+    help: bool,
+    version: bool,
+    preferences: bool,
+    tab: bool,
+    window: bool,
+    exec_command: Option<Vec<String>>, // from -- PROGRAM ...
+    command: Option<String>,           // from -e/--command
+    wait: bool,
+    active: bool,
+    full_screen: bool,
+    maximize: bool,
+    name: Option<String>,
+}
+
+fn cli_usage() -> &'static str {
+    "Usage: terminator2 [OPTION...] [-- PROGRAM [ARG...]]\n\n\
+Options:\n\
+  -h, --help            Show help\n\
+      --version         Show version\n\
+      --preferences     Show preferences window\n\
+      --tab             Open a new tab in last window\n\
+      --window          Open a new window\n\
+  -e, --command=CMD     Run command (deprecated; prefer -- PROGRAM)\n\
+      --wait            Wait until child exits\n\
+      --active          Mark last-specified tab active\n\
+      --full-screen     Open window full-screen\n\
+      --maximize        Maximize window\n\
+      --name=NAME       Set window title\n"
+}
+
+fn parse_cli(argv: &[String]) -> Result<CliRequest, String> {
+    let mut req = CliRequest::default();
+    // Skip argv[0]
+    let mut i = 1usize;
+    let mut after_double_dash = false;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if after_double_dash {
+            let rest = argv[i..].to_vec();
+            if rest.is_empty() { break; }
+            req.exec_command = Some(rest);
+            break;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            i += 1;
+            continue;
+        }
+        if arg == "-h" || arg == "--help" {
+            req.help = true; i+=1; continue;
+        }
+        if arg == "--version" { req.version = true; i+=1; continue; }
+        if arg == "--preferences" { req.preferences = true; i+=1; continue; }
+        if arg == "--tab" { req.tab = true; i+=1; continue; }
+        if arg == "--window" { req.window = true; i+=1; continue; }
+        if arg == "--wait" { req.wait = true; i+=1; continue; }
+        if arg == "--active" { req.active = true; i+=1; continue; }
+        if arg == "--full-screen" { req.full_screen = true; i+=1; continue; }
+        if arg == "--maximize" { req.maximize = true; i+=1; continue; }
+        if arg.starts_with("--name=") { req.name = Some(arg[7..].to_string()); i+=1; continue; }
+        if arg == "--name" {
+            if i+1 >= argv.len() { return Err("--name requires a value".into()); }
+            req.name = Some(argv[i+1].clone()); i+=2; continue;
+        }
+        if arg.starts_with("--command=") { req.command = Some(arg[10..].to_string()); i+=1; continue; }
+        if arg == "--command" || arg == "-e" {
+            if i+1 >= argv.len() { return Err("--command/-e requires a value".into()); }
+            req.command = Some(argv[i+1].clone()); i+=2; continue;
+        }
+        // Unknown option
+        if arg.starts_with('-') {
+            return Err(format!("unknown option: {}", arg));
+        } else {
+            // Treat as program (equivalent to -- PROGRAM ...)
+            let rest = argv[i..].to_vec();
+            req.exec_command = Some(rest);
+            break;
+        }
+    }
+    Ok(req)
+}
+
+#[cfg(test)]
+mod tests_cli {
+    use super::*;
+
+    fn av(args: &[&str]) -> Vec<String> { args.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn cli_help_and_version() {
+        let r = parse_cli(&av(&["terminator2","--help"])) .unwrap();
+        assert!(r.help);
+        let r = parse_cli(&av(&["terminator2","--version"])) .unwrap();
+        assert!(r.version);
+    }
+
+    #[test]
+    fn cli_preferences_and_window_tab() {
+        let r = parse_cli(&av(&["terminator2","--preferences","--window","--tab"])) .unwrap();
+        assert!(r.preferences && r.window && r.tab);
+    }
+
+    #[test]
+    fn cli_name_fullscreen_maximize() {
+        let r = parse_cli(&av(&["terminator2","--name","Foo","--full-screen"])) .unwrap();
+        assert_eq!(r.name.as_deref(), Some("Foo"));
+        assert!(r.full_screen);
+        let r = parse_cli(&av(&["terminator2","--name=Baz","--maximize"])) .unwrap();
+        assert_eq!(r.name.as_deref(), Some("Baz"));
+        assert!(r.maximize);
+    }
+
+    #[test]
+    fn cli_command_and_wait() {
+        let r = parse_cli(&av(&["terminator2","-e","ls -la","--wait"])) .unwrap();
+        assert_eq!(r.command.as_deref(), Some("ls -la"));
+        assert!(r.wait);
+    }
+
+    #[test]
+    fn cli_program_after_double_dash() {
+        let r = parse_cli(&av(&["terminator2","--","htop","-d","2"])) .unwrap();
+        assert_eq!(r.exec_command, Some(vec!["htop".to_string(),"-d".to_string(),"2".to_string()]));
+    }
+}
 struct AppState {
     app: Application,
     workspace: Rc<RefCell<WorkspaceModel>>,
@@ -133,24 +269,137 @@ struct AppState {
     controllers: RefCell<HashMap<WindowId, Rc<WorkspaceController>>>,
     last_focus: RefCell<HashMap<WindowId, (TabId, TerminalId)>>,
     creating_op: Cell<bool>,
+    activated_once: Cell<bool>,
+    last_window: Cell<Option<WindowId>>,
+    pending_window_title: RefCell<Option<String>>,
+    pending_maximize: Cell<bool>,
+    pending_fullscreen: Cell<bool>,
+    pending_exec: RefCell<Option<ExecRequest>>,
+    pending_wait: Cell<bool>,
 }
 
 impl AppState {
+    fn handle_cli_request(self: &Rc<Self>, app: &Application, req: CliRequest) {
+        // Apply window state requests for the next created window
+        if let Some(title) = req.name.clone() {
+            self.pending_window_title.borrow_mut().replace(title);
+        }
+        self.pending_maximize.set(req.maximize);
+        self.pending_fullscreen.set(req.full_screen);
+
+        if req.preferences {
+            // Open preferences on any window (or create one first)
+            let win_id = if let Some(id) = self.last_window.get() {
+                id
+            } else {
+                let id = self.workspace.borrow_mut().add_window();
+                self.ensure_window(id);
+                id
+            };
+            if let Some(controller) = self.controllers.borrow().get(&win_id) {
+                self.open_settings_dialog(&controller.window);
+            }
+        }
+
+        let mut target_window: Option<WindowId> = None;
+        if req.window {
+            let id = self.workspace.borrow_mut().add_window();
+            self.ensure_window(id);
+            target_window = Some(id);
+        }
+        if req.tab {
+            // Open tab in last window if any
+            let win_id = if let Some(id) = self.last_window.get() {
+                id
+            } else {
+                let id = self.workspace.borrow_mut().add_window();
+                self.ensure_window(id);
+                id
+            };
+            let _ = self.workspace.borrow_mut().add_tab_to_window(win_id);
+            self.ensure_window(win_id);
+            target_window = Some(win_id);
+        }
+
+        // Program/command handling
+        if req.command.is_some() || req.exec_command.is_some() {
+            let exec = if let Some(argv) = req.exec_command.clone() {
+                ExecRequest::Argv(argv)
+            } else {
+                ExecRequest::Shell(req.command.clone().unwrap())
+            };
+            self.pending_exec.borrow_mut().replace(exec);
+            self.pending_wait.set(req.wait);
+
+            // Choose default target: new tab in last window or new window if none
+            let win_id = if let Some(id) = target_window {
+                id
+            } else if let Some(id) = self.last_window.get() {
+                // Add a tab to existing
+                let _ = self.workspace.borrow_mut().add_tab_to_window(id);
+                self.ensure_window(id);
+                id
+            } else {
+                let id = self.workspace.borrow_mut().add_window();
+                self.ensure_window(id);
+                id
+            };
+
+            // If --wait, block until the spawned program exits
+            if req.wait {
+                let loop_ = glib::MainLoop::new(None, false);
+                let weak_self = Rc::downgrade(self);
+                let win = win_id;
+                let loop_clone_for_idle = loop_.clone();
+                glib::idle_add_local(move || {
+                    if let Some(state) = weak_self.upgrade() {
+                        if let Some(_controller) = state.controllers.borrow().get(&win) {
+                            let ws = state.workspace.borrow();
+                            if let Some(window) = ws.windows.iter().find(|w| w.id == win) {
+                                let term_id = window.active_tab().active_terminal();
+                                drop(ws);
+                                if let Some(term) = state.registry.borrow().terminal(term_id) {
+                                    let loop_clone = loop_clone_for_idle.clone();
+                                    term.connect_child_exited(move |_, _| {
+                                        loop_clone.quit();
+                                    });
+                                    return glib::ControlFlow::Break;
+                                }
+                            }
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+                loop_.run();
+            }
+        }
+
+        // Finally, if nothing specified, do default activation path
+        if !(req.window || req.tab || req.preferences || req.help || req.version || req.command.is_some() || req.exec_command.is_some()) {
+            self.on_activate(app);
+        }
+    }
     fn on_activate(self: &Rc<Self>, app: &Application) {
         apply_keybindings(app, &self.workspace.borrow().keybindings);
 
-        let window_ids: Vec<WindowId> = {
-            let ws = self.workspace.borrow();
-            ws.windows.iter().map(|w| w.id).collect()
-        };
-
-        if window_ids.is_empty() {
+        if !self.activated_once.replace(true) {
+            // First activation: realize existing windows or create the first one
+            let window_ids: Vec<WindowId> = {
+                let ws = self.workspace.borrow();
+                ws.windows.iter().map(|w| w.id).collect()
+            };
+            if window_ids.is_empty() {
+                let id = self.workspace.borrow_mut().add_window();
+                self.ensure_window(id);
+            } else {
+                for id in window_ids {
+                    self.ensure_window(id);
+                }
+            }
+        } else {
+            // Subsequent activations (second invocation of the binary): open a new window
             let id = self.workspace.borrow_mut().add_window();
             self.ensure_window(id);
-        } else {
-            for id in window_ids {
-                self.ensure_window(id);
-            }
         }
     }
 
@@ -160,6 +409,7 @@ impl AppState {
         }
 
         let controller = WorkspaceController::new(self.clone(), window_id);
+        self.last_window.set(Some(window_id));
         let initial_focus = controller.current_tab_id().and_then(|tab_id| {
             let term = self
                 .workspace
@@ -169,6 +419,18 @@ impl AppState {
         });
 
         self.controllers.borrow_mut().insert(window_id, controller);
+
+        // Apply pending window options (title, maximize/fullscreen) once on creation
+        if let Some(controller) = self.controllers.borrow().get(&window_id) {
+            if let Some(title) = self.pending_window_title.borrow_mut().take() {
+                controller.window.set_title(Some(&title));
+            }
+            if self.pending_fullscreen.take() {
+                controller.window.fullscreen();
+            } else if self.pending_maximize.take() {
+                controller.window.maximize();
+            }
+        }
 
         if let Some((tab_id, term_id)) = initial_focus {
             let weak = Rc::downgrade(self);
@@ -906,25 +1168,64 @@ struct WorkspaceController {
     hover_motions: RefCell<HashMap<TerminalId, EventControllerMotion>>,
     last_keyboard_focus: Cell<Option<std::time::Instant>>,
     preview_overlay: RefCell<Option<gtk4::Box>>,
+    #[allow(dead_code)]
     preview_label: RefCell<Option<gtk4::Label>>,
     // Rectangular overlay used for half-area drop previews over terminals
     preview_rect: RefCell<Option<gtk4::Box>>,
     drop_targets: RefCell<HashMap<TerminalId, gtk4::DropTarget>>,
     header_drags: RefCell<HashMap<TerminalId, GestureDrag>>,
+    split_panes: RefCell<HashMap<NodeId, Paned>>,
 }
 
 impl WorkspaceController {
+    fn compute_split_decision(&self, widget: &Widget, x: f64, y: f64) -> (SplitOrientation, bool) {
+        #[allow(deprecated)]
+        let alloc = widget.allocation();
+        let w = alloc.width().max(1) as f64;
+        let h = alloc.height().max(1) as f64;
+        let dx = ((x / w) - 0.5).abs();
+        let dy = ((y / h) - 0.5).abs();
+        if dx > dy {
+            (SplitOrientation::Horizontal, x < w / 2.0)
+        } else {
+            (SplitOrientation::Vertical, y < h / 2.0)
+        }
+    }
     
 
-    // Attach a DragSource that produces a resource descriptor (payload) for moves.
-    // The payload is a String consumed by DropTargets and parsed via DragPayload.
+    // Attach a DragSource that produces a typed (GBoxed) payload for moves.
     // This allows moving either a terminal (header/tab label) or an inner tab content.
-    fn attach_drag_source_with_owner(self: &Rc<Self>, widget: &impl IsA<Widget>, payload: String) {
+    fn attach_drag_source_with_owner(self: &Rc<Self>, widget: &impl IsA<Widget>, payload: DragData) {
         let drag = DragSource::new();
         drag.set_actions(gtk4::gdk::DragAction::MOVE);
         drag.connect_prepare(move |_, _, _| {
             let v = payload.to_value();
             Some(gtk4::gdk::ContentProvider::for_value(&v))
+        });
+        // Give the drag a visual snapshot of the widget as the drag icon
+        drag.connect_drag_begin(|src, drag| {
+            let icon = gtk4::DragIcon::for_drag(drag);
+            if let Some(widget) = src.widget() {
+                // Prefer showing the whole terminal wrapper (header + terminal) as the drag image
+                let parent = widget.parent().unwrap_or(widget);
+                // Use a paintable of the parent widget and scale it down to a reasonable size
+                let paintable = gtk4::WidgetPaintable::new(Some(&parent));
+                let picture = gtk4::Picture::for_paintable(&paintable);
+                picture.set_can_shrink(true);
+                picture.set_content_fit(gtk4::ContentFit::ScaleDown);
+                // Cap the icon size; actual size auto-scales to aspect ratio
+                picture.set_size_request(360, 240);
+                icon.set_child(Some(&picture));
+                // Hotspot offset a bit from top-left so cursor doesn't occlude
+                drag.set_hotspot(12, 12);
+            } else {
+                // Fallback ghost box
+                let ghost = Box::new(Orientation::Horizontal, 0);
+                ghost.add_css_class("dnd-preview");
+                ghost.set_size_request(96, 48);
+                icon.set_child(Some(&ghost));
+                drag.set_hotspot(8, 8);
+            }
         });
         widget.add_controller(drag);
     }
@@ -974,6 +1275,7 @@ impl WorkspaceController {
 
 
     #[allow(deprecated)]
+    #[allow(dead_code)]
     fn show_preview(&self, text: &str) {
         // Full overlay with centered label for generic previews (e.g., tab headers)
         if let Some(lbl) = self.preview_label.borrow().as_ref() {
@@ -1205,6 +1507,7 @@ impl WorkspaceController {
             preview_rect: RefCell::new(None),
             drop_targets: RefCell::new(HashMap::new()),
             header_drags: RefCell::new(HashMap::new()),
+            split_panes: RefCell::new(HashMap::new()),
         });
 
         controller.install_actions();
@@ -1601,11 +1904,11 @@ impl WorkspaceController {
         self: &Rc<Self>,
         tab_id: TabId,
         node: &LayoutNode,
-        from_split: bool,
+        _from_split: bool,
     ) -> gtk4::Widget {
         match node {
             LayoutNode::Terminal(leaf) => self
-                .build_terminal(tab_id, leaf, from_split)
+                .build_terminal(tab_id, leaf, true)
                 .upcast::<gtk4::Widget>(),
             LayoutNode::Split(split) => self.build_split(tab_id, split),
             LayoutNode::Tabs(group) => self.build_inner_tabs(tab_id, group),
@@ -1624,7 +1927,7 @@ impl WorkspaceController {
             .map(|child| self.build_node(tab_id, child, true))
             .unwrap_or_else(|| Box::new(Orientation::Vertical, 0).upcast());
 
-        children_iter.fold(first, |acc, child| {
+        let widget = children_iter.fold(first, |acc, child| {
             let paned = Paned::new(orientation);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
@@ -1640,7 +1943,11 @@ impl WorkspaceController {
             let next = self.build_node(tab_id, child, true);
             paned.set_end_child(Some(&next));
             paned.upcast()
-        })
+        });
+        if let Ok(paned) = widget.clone().downcast::<Paned>() {
+            self.split_panes.borrow_mut().insert(split.node_id, paned);
+        }
+        widget
     }
 
     fn build_terminal(
@@ -1723,10 +2030,7 @@ impl WorkspaceController {
             // Resource descriptor format (string):
             //   "term-move window=<uuid> tab=<uuid> [inner=<uuid>] terminal=<uuid> src=header"
             // The DropTarget decodes it via DragPayload and decides how to split/insert.
-            let payload = format!(
-                "term-move window={} tab={} terminal={} src=header",
-                self.window_id.0, tab_id.0, leaf.terminal_id.0
-            );
+            let payload = dnd_payload(self.window_id, Some(tab_id), None, leaf.terminal_id);
             self.attach_drag_source_with_owner(&header, payload);
             wrapper.append(&header);
         }
@@ -1794,24 +2098,29 @@ impl WorkspaceController {
 
         self.install_terminal_menu(&terminal, tab_id, leaf.terminal_id);
 
+        // Spawn program or shell
+        if let Some(state) = self.state.upgrade() {
+            if let Some(exec) = state.pending_exec.borrow_mut().take() {
+                spawn_program(&terminal, exec);
+            } else {
+                spawn_shell(&terminal);
+            }
+        } else {
+            spawn_shell(&terminal);
+        }
+
         // Install DropTarget on the wrapper to accept drags for splitting
-        let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+        let drop = gtk4::DropTarget::new(DragData::static_type(), gtk4::gdk::DragAction::MOVE);
         let weak_self = Rc::downgrade(self);
         let target_terminal = leaf.terminal_id;
         drop.connect_motion(move |dt, x, y| {
             // Show half-area preview overlay for the side closest to the cursor
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(widget) = dt.widget() {
-                    #[allow(deprecated)]
-                    let alloc = widget.allocation();
-                    let w = alloc.width().max(1) as f64;
-                    let h = alloc.height().max(1) as f64;
-                    let dx = ((x / w) - 0.5).abs();
-                    let dy = ((y / h) - 0.5).abs();
-                    let side = if dx > dy {
-                        if x < w / 2.0 { "left" } else { "right" }
-                    } else {
-                        if y < h / 2.0 { "top" } else { "bottom" }
+                    let (orientation, insert_first) = controller.compute_split_decision(&widget, x, y);
+                    let side = match orientation {
+                        SplitOrientation::Horizontal => if insert_first { "left" } else { "right" },
+                        SplitOrientation::Vertical => if insert_first { "top" } else { "bottom" },
                     };
                     controller.show_split_preview_on(&widget, side);
                 }
@@ -1827,40 +2136,51 @@ impl WorkspaceController {
         let weak_self = Rc::downgrade(self);
         // Drop handler: interpret resource descriptor and perform split/move
         drop.connect_drop(move |dt, value, x, y| {
-            let payload = value.get::<String>().ok().unwrap_or_default();
-            let moving = match DragPayload::try_from(payload.as_str()) {
-                Ok(p) => p.terminal,
-                Err(_) => return false,
-            };
+            let parsed = match value.get::<DragData>() { Ok(p) => p, Err(_) => return false };
+            let moving = parsed.terminal;
             if moving == target_terminal {
+                // Hide preview even if ignored
+                if let Some(controller) = weak_self.upgrade() { controller.hide_preview(); }
                 return false;
             }
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    // Decide orientation based on drop position (left/right -> horizontal, top/bottom -> vertical)
-                    let mut orientation = SplitOrientation::Vertical;
-                    if let Some(widget) = dt.widget() {
-                        #[allow(deprecated)]
-                        let alloc = widget.allocation();
-                        let w = alloc.width().max(1) as f64;
-                        let h = alloc.height().max(1) as f64;
-                        let dx = ((x / w) - 0.5).abs();
-                        let dy = ((y / h) - 0.5).abs();
-                        orientation = if dx > dy {
-                            SplitOrientation::Horizontal
-                        } else {
-                            SplitOrientation::Vertical
-                        };
-                    }
-                    // Apply the split: move dragged terminal into a new split at the target side.
-                    // Orientation: Horizontal for left/right, Vertical for top/bottom.
+                    // Snapshot parent split position to preserve outer boundaries
+                    let parent_split_and_pos: Option<(NodeId, i32)> = (|| {
+                        let tab_id = state.current_tab_id(controller.window_id)?;
+                        let parent_id = state
+                            .workspace
+                            .borrow()
+                            .parent_split_id_of_terminal(controller.window_id, tab_id, target_terminal)?;
+                        let pos = state
+                            .controllers
+                            .borrow()
+                            .get(&controller.window_id)
+                            .and_then(|c| c.split_panes.borrow().get(&parent_id).cloned())
+                            .map(|p| p.position())?;
+                        Some((parent_id, pos))
+                    })();
+                    // Decide orientation and side based on drop position
+                    let (orientation, insert_first) = dt
+                        .widget()
+                        .map(|w| controller.compute_split_decision(&w, x, y))
+                        .unwrap_or((SplitOrientation::Vertical, false));
+                    // Apply the split honoring side: left/top inserts before; right/bottom after.
                     let ok = state
                         .workspace
                         .borrow_mut()
-                        .move_terminal_to_split(controller.window_id, moving, target_terminal, orientation);
+                        .move_terminal_to_split_at_side(controller.window_id, moving, target_terminal, orientation, insert_first);
+                    controller.hide_preview();
                     if ok {
                         state.rebuild_window(controller.window_id);
-                        controller.hide_preview();
+                        // Restore parent split position if we have it
+                        if let Some((id, pos)) = parent_split_and_pos {
+                            if let Some(controller2) = state.controllers.borrow().get(&controller.window_id) {
+                                if let Some(paned) = controller2.split_panes.borrow().get(&id) {
+                                    paned.set_position(pos);
+                                }
+                            }
+                        }
                         // Focus moved terminal
                         if let Some(tab_id) = state.current_tab_id(controller.window_id) {
                             state.focus_and_remember(controller.window_id, tab_id, moving);
@@ -1921,44 +2241,20 @@ impl WorkspaceController {
             // Do not claim drags on inner tab labels to keep click/edit behavior intact
 
             // Enable drag from inner tab label to avoid interacting with Paned handles
-            let payload = format!(
-                "term-move window={} tab={} inner={} terminal={} src=inner_label",
-                self.window_id.0, tab_id.0, inner.id.0, inner.focus.0
-            );
+            let payload = dnd_payload(self.window_id, Some(tab_id), Some(inner.id), inner.focus);
             self.attach_drag_source_with_owner(&label_box, payload);
 
             // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
             // from labels since they live outside Paned content.
 
-            // Preview on drag motion over inner tab label (new inner tab)
-            let weak_self_motion = Rc::downgrade(self);
-            let drop_motion = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
-            drop_motion.connect_motion(move |_, _, _| {
-                if let Some(controller) = weak_self_motion.upgrade() {
-                    controller.show_preview("New Inner Tab");
-                }
-                gtk4::gdk::DragAction::MOVE
-            });
-            drop_motion.connect_leave({
-                let weak_self = Rc::downgrade(self);
-                move |_| {
-                    if let Some(controller) = weak_self.upgrade() {
-                        controller.hide_preview();
-                    }
-                }
-            });
-            label_box.add_controller(drop_motion);
+            // No motion overlay for inner tab label; previews only for split targets.
 
             // Drop onto inner tab label box: move existing terminal into a new inner tab
-            let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            let drop = gtk4::DropTarget::new(DragData::static_type(), gtk4::gdk::DragAction::MOVE);
             let target_inner = inner.id;
             let weak_self = Rc::downgrade(self);
             drop.connect_drop(move |_dt, value, _x, _y| {
-                let payload = value.get::<String>().ok().unwrap_or_default();
-                let parsed = match DragPayload::try_from(payload.as_str()) {
-                    Ok(p) => p,
-                    Err(_) => return false,
-                };
+                let parsed = match value.get::<DragData>() { Ok(p) => p, Err(_) => return false };
                 let moving = parsed.terminal;
                 let src_window = parsed.window;
                 if let Some(controller) = weak_self.upgrade() {
@@ -2059,6 +2355,7 @@ impl WorkspaceController {
 
         self.tab_labels.borrow_mut().clear();
         self.inner_tab_labels.borrow_mut().clear();
+        self.split_panes.borrow_mut().clear();
 
         let mut new_page_ids = Vec::with_capacity(window_model.tabs.len());
 
@@ -2070,53 +2367,26 @@ impl WorkspaceController {
             let (label_box, tab_label, close_btn) = build_tab_label(tab.display_title(), tab.is_title_flexible());
 
             // Enable drag from top-level tab labels as well
-            let payload = format!(
-                "term-move window={} tab={} terminal={} src=top_label",
-                self.window_id.0,
-                tab.id.0,
-                tab.active_terminal().0
-            );
+            let payload = dnd_payload(self.window_id, Some(tab.id), None, tab.active_terminal());
             self.attach_drag_source_with_owner(&label_box, payload);
 
             // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
             // from labels since they live outside Paned content.
 
-            // Preview on drag motion over top-level tab header (new tab)
-            let weak_self_motion = Rc::downgrade(self);
-            let drop_motion = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
-            drop_motion.connect_motion(move |_, _, _| {
-                if let Some(controller) = weak_self_motion.upgrade() {
-                    controller.show_preview("New Tab");
-                }
-                gtk4::gdk::DragAction::MOVE
-            });
-            drop_motion.connect_leave({
-                let weak_self = Rc::downgrade(self);
-                move |_| {
-                    if let Some(controller) = weak_self.upgrade() {
-                        controller.hide_preview();
-                    }
-                }
-            });
-            label_box.add_controller(drop_motion);
+            // No motion overlay for top-level labels; previews only for split targets.
 
             // Drop on top-level tab label: move existing terminal into a new top-level tab
-            let drop = gtk4::DropTarget::new(String::static_type(), gtk4::gdk::DragAction::MOVE);
+            let drop = gtk4::DropTarget::new(DragData::static_type(), gtk4::gdk::DragAction::MOVE);
             let weak_self = Rc::downgrade(self);
             drop.connect_drop(move |_dt, value, _x, _y| {
-                let payload = value.get::<String>().ok().unwrap_or_default();
-                let parsed = match DragPayload::try_from(payload.as_str()) {
-                    Ok(p) => p,
-                    Err(_) => return false,
-                };
+                let parsed = match value.get::<DragData>() { Ok(p) => p, Err(_) => return false };
                 let moving = parsed.terminal;
-                let src_window = parsed.window;
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
                         if let Some(new_tab) = state
                             .workspace
                             .borrow_mut()
-                            .move_terminal_to_new_tab(src_window, moving)
+                            .move_terminal_to_new_tab(controller.window_id, moving)
                         {
                             state.rebuild_window(controller.window_id);
                             state.focus_and_remember(controller.window_id, new_tab, moving);
@@ -2545,7 +2815,9 @@ fn ensure_custom_css() {
 
 /* Drag-and-drop preview overlay */
 .dnd-preview {
-    background-color: rgba(0, 0, 0, 0.5);
+    background-color: rgba(0, 0, 0, 0.35);
+    border: 2px solid rgba(74, 144, 226, 0.9);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25) inset;
 }
 .dnd-preview * {
     color: #ffffff;
@@ -2631,6 +2903,35 @@ fn spawn_shell(terminal: &Terminal) {
     glib::MainContext::default().spawn_local(async move {
         if let Err(error) = future.await {
             eprintln!("Failed to spawn shell: {error}");
+        }
+    });
+}
+
+#[derive(Clone, Debug)]
+enum ExecRequest {
+    Argv(Vec<String>),
+    Shell(String),
+}
+
+fn spawn_program(terminal: &Terminal, req: ExecRequest) {
+    let (argv_vec, flags) = match req {
+        ExecRequest::Argv(v) => (v, glib::SpawnFlags::SEARCH_PATH),
+        ExecRequest::Shell(s) => (vec!["/bin/sh".to_string(), "-lc".to_string(), s], glib::SpawnFlags::SEARCH_PATH),
+    };
+    let argv_strings: Vec<String> = argv_vec;
+    let argv: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let future = terminal.spawn_future(
+        PtyFlags::DEFAULT,
+        None,
+        &argv,
+        &[],
+        flags,
+        || {},
+        -1,
+    );
+    glib::MainContext::default().spawn_local(async move {
+        if let Err(error) = future.await {
+            eprintln!("Failed to spawn program: {error}");
         }
     });
 }
@@ -3024,6 +3325,13 @@ mod gui_tests {
                                     controllers: RefCell::new(HashMap::new()),
                                     last_focus: RefCell::new(HashMap::new()),
                                     creating_op: Cell::new(false),
+                                    activated_once: Cell::new(false),
+                                    last_window: Cell::new(None),
+                                    pending_window_title: RefCell::new(None),
+                                    pending_maximize: Cell::new(false),
+                                    pending_fullscreen: Cell::new(false),
+                                    pending_exec: RefCell::new(None),
+                                    pending_wait: Cell::new(false),
                                 });
 
                                 state.install_theme_listener();

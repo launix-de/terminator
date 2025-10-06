@@ -8,6 +8,76 @@ use uuid::Uuid;
 use crate::model::{LayoutNode, TabGroup, InnerTab, TerminalLeaf, NodeId, TerminalId, InnerTabId, SplitNode, SplitOrientation};
 
 impl LayoutNode {
+    pub fn find_parent_split_id_of_terminal(&self, target: TerminalId) -> Option<NodeId> {
+        fn rec(node: &LayoutNode, target: TerminalId, current: Option<NodeId>) -> Option<NodeId> {
+            match node {
+                LayoutNode::Terminal(leaf) => {
+                    if leaf.terminal_id == target { current } else { None }
+                }
+                LayoutNode::Split(split) => {
+                    for child in &split.children {
+                        if let Some(id) = rec(child, target, Some(split.node_id)) {
+                            return Some(id);
+                        }
+                    }
+                    None
+                }
+                LayoutNode::Tabs(group) => {
+                    for inner in &group.tabs {
+                        if let Some(id) = rec(&inner.root, target, current) {
+                            return Some(id);
+                        }
+                    }
+                    None
+                }
+            }
+        }
+        rec(self, target, None)
+    }
+    /// Generic helper: replace the terminal leaf with id `target` by applying `transform`
+    /// to the existing leaf node and writing the result back in-place.
+    #[allow(dead_code)]
+    pub(crate) fn replace_leaf_at_terminal<F>(&mut self, target: TerminalId, transform: &mut F) -> bool
+    where
+        F: FnMut(LayoutNode) -> LayoutNode,
+    {
+        match self {
+            LayoutNode::Terminal(leaf) => {
+                if leaf.terminal_id == target {
+                    let existing = std::mem::replace(
+                        self,
+                        // Temporary placeholder; will be replaced by transform
+                        LayoutNode::Split(SplitNode {
+                            node_id: NodeId(Uuid::new_v4()),
+                            orientation: SplitOrientation::Vertical,
+                            children: Vec::new(),
+                        }),
+                    );
+                    *self = transform(existing);
+                    true
+                } else {
+                    false
+                }
+            }
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.replace_leaf_at_terminal(target, transform) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Tabs(group) => {
+                for (idx, inner) in group.tabs.iter_mut().enumerate() {
+                    if inner.root.replace_leaf_at_terminal(target, transform) {
+                        group.active = idx;
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
     pub(crate) fn as_tab_group_mut(&mut self) -> Option<&mut TabGroup> {
         match self {
             LayoutNode::Tabs(group) => Some(group),
@@ -411,6 +481,7 @@ impl LayoutNode {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn replace_leaf_with_split_existing(
         &mut self,
         target: TerminalId,
@@ -463,6 +534,80 @@ impl LayoutNode {
                     if inner
                         .root
                         .replace_leaf_with_split_existing(target, orientation, moving_terminal_id)
+                    {
+                        group.active = idx;
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    pub(crate) fn replace_leaf_with_split_existing_ordered(
+        &mut self,
+        target: TerminalId,
+        orientation: SplitOrientation,
+        moving_terminal_id: TerminalId,
+        insert_first: bool,
+    ) -> bool {
+        match self {
+            LayoutNode::Terminal(leaf) => {
+                if leaf.terminal_id == target {
+                    let existing = std::mem::replace(
+                        self,
+                        LayoutNode::Split(SplitNode {
+                            node_id: NodeId(Uuid::new_v4()),
+                            orientation,
+                            children: Vec::new(),
+                        }),
+                    );
+                    if let LayoutNode::Split(split_node) = self {
+                        let existing_leaf = existing;
+                        let new_leaf = LayoutNode::Terminal(TerminalLeaf {
+                            node_id: NodeId(Uuid::new_v4()),
+                            terminal_id: moving_terminal_id,
+                            title: String::from("Terminal"),
+                            title_flexible: true,
+                        });
+                        if insert_first {
+                            split_node.children.push(new_leaf);
+                            split_node.children.push(existing_leaf);
+                        } else {
+                            split_node.children.push(existing_leaf);
+                            split_node.children.push(new_leaf);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            LayoutNode::Split(split) => {
+                for child in &mut split.children {
+                    if child.replace_leaf_with_split_existing_ordered(
+                        target,
+                        orientation,
+                        moving_terminal_id,
+                        insert_first,
+                    ) {
+                        return true;
+                    }
+                }
+                false
+            }
+            LayoutNode::Tabs(group) => {
+                for (idx, inner) in group.tabs.iter_mut().enumerate() {
+                    if inner
+                        .root
+                        .replace_leaf_with_split_existing_ordered(
+                            target,
+                            orientation,
+                            moving_terminal_id,
+                            insert_first,
+                        )
                     {
                         group.active = idx;
                         return true;
