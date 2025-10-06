@@ -40,10 +40,17 @@ use vte4::{Format, PtyFlags, Terminal, prelude::*};
 #[boxed_type(name = "TerminatorDragPayload")]
 #[allow(dead_code)]
 struct DragData {
+    kind: DragKind,
     window: WindowId,
     tab: Option<TabId>,
     inner: Option<InnerTabId>,
     terminal: TerminalId,
+}
+
+#[derive(Clone, Debug)]
+enum DragKind {
+    Terminal,
+    Tab,
 }
 
 const ACTION_DEFS: &[(ActionId, &str)] = &[
@@ -66,8 +73,8 @@ const ACTION_DEFS: &[(ActionId, &str)] = &[
 ];
 
 // Helper to construct a payload
-fn dnd_payload(window: WindowId, tab: Option<TabId>, inner: Option<InnerTabId>, terminal: TerminalId) -> DragData {
-    DragData { window, tab, inner, terminal }
+fn dnd_payload(kind: DragKind, window: WindowId, tab: Option<TabId>, inner: Option<InnerTabId>, terminal: TerminalId) -> DragData {
+    DragData { kind, window, tab, inner, terminal }
 }
 
 fn main() -> gtk4::glib::ExitCode {
@@ -638,6 +645,36 @@ impl AppState {
         });
 
         if let Some(terminal_id) = focused {
+            // Snapshot positions of all known paneds before mutating the model
+            let pre_positions: std::collections::HashMap<NodeId, Vec<i32>> = {
+                let mut map = std::collections::HashMap::new();
+                if let Some(ctrl) = self.controllers.borrow().get(&window_id) {
+                    for (id, paneds) in ctrl.split_panes.borrow().iter() {
+                        let mut v = Vec::new();
+                        for p in paneds { v.push(p.position()); }
+                        map.insert(*id, v);
+                    }
+                }
+                map
+            };
+            // Capture parent split info (id, orientation, child index) for the focused terminal
+            let parent_info = {
+                let ws = self.workspace.borrow();
+                if let Some(tab_id) = current_tab {
+                    ws.parent_split_info_for_terminal(window_id, tab_id, terminal_id)
+                } else { None }
+            };
+            // If we have a parent and it is same orientation, compute its current child weights
+            let parent_weights: Option<(NodeId, Vec<f64>, usize)> = if let Some((pid, porient, pidx)) = parent_info {
+                if porient == orientation {
+                    if let Some(ctrl) = self.controllers.borrow().get(&window_id) {
+                        if let Some(paneds) = ctrl.split_panes.borrow().get(&pid) {
+                            let wts = WorkspaceController::compute_weights_from_paneds(paneds, orientation);
+                            Some((pid, wts, pidx))
+                        } else { None }
+                    } else { None }
+                } else { None }
+            } else { None };
             let new_terminal = {
                 let mut workspace = self.workspace.borrow_mut();
                 workspace.split_terminal(window_id, terminal_id, orientation)
@@ -649,6 +686,37 @@ impl AppState {
                     self.set_active_terminal_no_rebuild(window_id, tab_id_value, new_id);
                 }
                 self.rebuild_window(window_id);
+                // Restore positions after rebuild to avoid redistributing other panes
+                let positions = pre_positions.clone();
+                let parent_weights = parent_weights.clone();
+                let orient = orientation;
+                let weak = Rc::downgrade(self);
+                glib::idle_add_local(move || {
+                    if let Some(app_state) = weak.upgrade() {
+                        if let Some(ctrl2) = app_state.controllers.borrow().get(&window_id) {
+                            for (id, pos_list) in &positions {
+                                if let Some(paneds) = ctrl2.split_panes.borrow().get(id) {
+                                    let n = std::cmp::min(paneds.len(), pos_list.len());
+                                    for i in 0..n { paneds[i].set_position(pos_list[i]); }
+                                }
+                            }
+                            // If the parent was same-orientation, compute and apply new divider positions
+                            if let Some((pid, old_weights, child_idx)) = &parent_weights {
+                                if let Some(paneds) = ctrl2.split_panes.borrow().get(&pid) {
+                                    if old_weights.len() >= 1 && paneds.len() + 1 == old_weights.len() + 1 {
+                                        // Build new weights by splitting the target child's weight in half
+                                        let mut new_w = Vec::with_capacity(old_weights.len() + 1);
+                                        for (i, w) in old_weights.iter().enumerate() {
+                                            if i == *child_idx { new_w.push(w / 2.0); new_w.push(w / 2.0); } else { new_w.push(*w); }
+                                        }
+                                        WorkspaceController::apply_weights_to_paneds(paneds, &new_w, orient);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    glib::ControlFlow::Break
+                });
                 if let Some(tab_id_value) = tab_id {
                     let weak = Rc::downgrade(self);
                     glib::idle_add_local(move || {
@@ -1173,11 +1241,53 @@ struct WorkspaceController {
     // Rectangular overlay used for half-area drop previews over terminals
     preview_rect: RefCell<Option<gtk4::Box>>,
     drop_targets: RefCell<HashMap<TerminalId, gtk4::DropTarget>>,
+    #[allow(dead_code)]
     header_drags: RefCell<HashMap<TerminalId, GestureDrag>>,
-    split_panes: RefCell<HashMap<NodeId, Paned>>,
+    // For each model SplitNode, we keep all GTK Paned widgets that implement
+    // its N-children layout (N-1 paneds as a left-nested chain). This allows
+    // us to snapshot and restore all divider positions across rebuilds.
+    split_panes: RefCell<HashMap<NodeId, Vec<Paned>>>,
 }
 
 impl WorkspaceController {
+    /// Compute per-child weights for a split represented by a chain of nested Paneds.
+    /// For N children there are N-1 Paneds; each Paned's ratio is start/(start+end).
+    /// Returns normalized weights that sum to 1.0.
+    fn compute_weights_from_paneds(paneds: &Vec<Paned>, orientation: SplitOrientation) -> Vec<f64> {
+        if paneds.is_empty() { return vec![1.0]; }
+        let mut weights: Vec<f64> = Vec::with_capacity(paneds.len() + 1);
+        // Start with an arbitrary base weight for the first child
+        weights.push(1.0);
+        for (_idx, p) in paneds.iter().enumerate() {
+            #[allow(deprecated)]
+            let alloc = p.allocation();
+            let len = match orientation { SplitOrientation::Horizontal => alloc.width().max(1) as f64, SplitOrientation::Vertical => alloc.height().max(1) as f64 };
+            let r = (p.position().max(1) as f64 / len).clamp(0.01, 0.99);
+            let left_sum: f64 = weights.iter().sum();
+            let next = left_sum * ((1.0 - r) / r);
+            weights.push(next);
+        }
+        let sum: f64 = weights.iter().sum();
+        if sum > 0.0 { for w in &mut weights { *w /= sum; } }
+        weights
+    }
+
+    /// Apply given per-child weights to a chain of Paneds by setting positions accordingly.
+    fn apply_weights_to_paneds(paneds: &Vec<Paned>, weights: &Vec<f64>, orientation: SplitOrientation) {
+        if paneds.is_empty() || weights.len() <= 1 { return; }
+        // For each boundary i between child i and i+1, ratio = sum(0..i)/ (sum(0..i)+w[i+1])
+        let mut prefix_sum = 0.0f64;
+        for (i, p) in paneds.iter().enumerate() {
+            prefix_sum += weights[i];
+            let denom = prefix_sum + weights[i+1];
+            let ratio = if denom > 0.0 { (prefix_sum / denom).clamp(0.0, 1.0) } else { 0.5 };
+            #[allow(deprecated)]
+            let alloc = p.allocation();
+            let len = match orientation { SplitOrientation::Horizontal => alloc.width().max(1) as f64, SplitOrientation::Vertical => alloc.height().max(1) as f64 };
+            let pos = (len * ratio).round() as i32;
+            p.set_position(pos);
+        }
+    }
     fn compute_split_decision(&self, widget: &Widget, x: f64, y: f64) -> (SplitOrientation, bool) {
         #[allow(deprecated)]
         let alloc = widget.allocation();
@@ -1206,10 +1316,18 @@ impl WorkspaceController {
         drag.connect_drag_begin(|src, drag| {
             let icon = gtk4::DragIcon::for_drag(drag);
             if let Some(widget) = src.widget() {
-                // Prefer showing the whole terminal wrapper (header + terminal) as the drag image
-                let parent = widget.parent().unwrap_or(widget);
-                // Use a paintable of the parent widget and scale it down to a reasonable size
-                let paintable = gtk4::WidgetPaintable::new(Some(&parent));
+                // If the source widget is the terminal wrapper, use it directly. Otherwise try its parent wrapper.
+                let use_widget = if widget
+                    .css_classes()
+                    .iter()
+                    .any(|c| c.as_str() == "terminal-wrapper")
+                {
+                    widget.clone()
+                } else {
+                    widget.parent().unwrap_or(widget)
+                };
+                // Use a paintable of the chosen widget and scale it down to a reasonable size
+                let paintable = gtk4::WidgetPaintable::new(Some(&use_widget));
                 let picture = gtk4::Picture::for_paintable(&paintable);
                 picture.set_can_shrink(true);
                 picture.set_content_fit(gtk4::ContentFit::ScaleDown);
@@ -1921,33 +2039,33 @@ impl WorkspaceController {
             SplitOrientation::Vertical => Orientation::Vertical,
         };
 
+        // Build a left-nested chain of Paned widgets and retain all of them for this SplitNode
         let mut children_iter = split.children.iter();
-        let first = children_iter
+        let mut acc_widget = children_iter
             .next()
             .map(|child| self.build_node(tab_id, child, true))
             .unwrap_or_else(|| Box::new(Orientation::Vertical, 0).upcast());
 
-        let widget = children_iter.fold(first, |acc, child| {
+        let mut paneds: Vec<Paned> = Vec::new();
+        for child in children_iter {
             let paned = Paned::new(orientation);
             paned.set_hexpand(true);
             paned.set_vexpand(true);
             // Ensure only the thin separator between panes can start a resize
-            // This prevents drags from child widgets (like titlebars) from initiating a Paned resize
             let _ = paned.set_property("wide-handle", &false);
-            // No local Paned guard: handle is visually narrow (4px) and we disable
-            // Paned only while hovering titlebars via header-level motion handlers.
             // Avoid shrinking children to zero; allow both children to resize
             paned.set_shrink_start_child(false);
             paned.set_shrink_end_child(false);
-            paned.set_start_child(Some(&acc));
+            paned.set_start_child(Some(&acc_widget));
             let next = self.build_node(tab_id, child, true);
             paned.set_end_child(Some(&next));
-            paned.upcast()
-        });
-        if let Ok(paned) = widget.clone().downcast::<Paned>() {
-            self.split_panes.borrow_mut().insert(split.node_id, paned);
+            paneds.push(paned.clone());
+            acc_widget = paned.upcast();
         }
-        widget
+
+        // Record the whole chain of paneds for this split node (may be empty for 1 child)
+        self.split_panes.borrow_mut().insert(split.node_id, paneds);
+        acc_widget
     }
 
     fn build_terminal(
@@ -1967,6 +2085,7 @@ impl WorkspaceController {
         };
 
         let wrapper = Box::new(Orientation::Vertical, if show_header { 2 } else { 0 });
+        wrapper.add_css_class("terminal-wrapper");
         wrapper.set_hexpand(true);
         wrapper.set_vexpand(true);
 
@@ -1980,21 +2099,7 @@ impl WorkspaceController {
             header.append(&label);
             label_ref = Some(label);
 
-            // Do not claim here; Paned resize prevention is handled via can_target toggling
-            // while an app drag is in progress (see set_drag_in_progress).
-            let header_drag = GestureDrag::new();
-            header_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            // Only react to primary button drags from the header
-            header_drag.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
-            header_drag.connect_drag_begin(|_g, _sx, _sy| {});
-            header.add_controller(header_drag.clone());
-            // Keep for tests
-            if let Some(controller) = self.state.upgrade().and_then(|_| Some(self.clone())) {
-                controller
-                    .header_drags
-                    .borrow_mut()
-                    .insert(leaf.terminal_id, header_drag);
-            }
+            // Paned resize prevention is handled via motion enter/leave toggle below.
             // While hovering the titlebar, temporarily disable the nearest ancestor Paned
             // so starting a drag here cannot initiate a resize.
             let motion = EventControllerMotion::new();
@@ -2026,15 +2131,54 @@ impl WorkspaceController {
             });
             header.add_controller(motion);
 
+            // Capture primary presses on the header to avoid Paned handle intercepting
+            let cap_click = GestureClick::new();
+            cap_click.set_button(gtk4::gdk::ffi::GDK_BUTTON_PRIMARY as u32);
+            cap_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            cap_click.connect_pressed(|g, _n, _x, _y| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+                if let Some(w) = g.widget() {
+                    let mut parent = w.parent();
+                    while let Some(p) = parent.clone() {
+                        if let Ok(paned) = p.clone().downcast::<Paned>() {
+                            paned.set_can_target(false);
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+                }
+            });
+            cap_click.connect_released(|g, _n, _x, _y| {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+                if let Some(w) = g.widget() {
+                    let mut parent = w.parent();
+                    while let Some(p) = parent.clone() {
+                        if let Ok(paned) = p.clone().downcast::<Paned>() {
+                            paned.set_can_target(true);
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+                }
+            });
+            header.add_controller(cap_click);
+
             // Add a minimal drag source so grabbing the header initiates a drag operation.
             // Resource descriptor format (string):
             //   "term-move window=<uuid> tab=<uuid> [inner=<uuid>] terminal=<uuid> src=header"
             // The DropTarget decodes it via DragPayload and decides how to split/insert.
-            let payload = dnd_payload(self.window_id, Some(tab_id), None, leaf.terminal_id);
+            let payload = dnd_payload(DragKind::Terminal, self.window_id, Some(tab_id), None, leaf.terminal_id);
             self.attach_drag_source_with_owner(&header, payload);
             wrapper.append(&header);
         }
         wrapper.append(&terminal);
+
+        // Also allow dragging from the whole wrapper (body), not only the header.
+        // This helps in dense splits where the header is close to the Paned handle.
+        {
+            let payload = dnd_payload(DragKind::Terminal, self.window_id, Some(tab_id), None, leaf.terminal_id);
+            self.attach_drag_source_with_owner(&wrapper, payload);
+        }
 
         if let Some(label) = &label_ref {
             state.registry().borrow_mut().register_label(
@@ -2098,16 +2242,7 @@ impl WorkspaceController {
 
         self.install_terminal_menu(&terminal, tab_id, leaf.terminal_id);
 
-        // Spawn program or shell
-        if let Some(state) = self.state.upgrade() {
-            if let Some(exec) = state.pending_exec.borrow_mut().take() {
-                spawn_program(&terminal, exec);
-            } else {
-                spawn_shell(&terminal);
-            }
-        } else {
-            spawn_shell(&terminal);
-        }
+        // Do not spawn here; spawning is handled in TerminalRegistry::ensure_terminal
 
         // Install DropTarget on the wrapper to accept drags for splitting
         let drop = gtk4::DropTarget::new(DragData::static_type(), gtk4::gdk::DragAction::MOVE);
@@ -2145,26 +2280,39 @@ impl WorkspaceController {
             }
             if let Some(controller) = weak_self.upgrade() {
                 if let Some(state) = controller.state.upgrade() {
-                    // Snapshot parent split position to preserve outer boundaries
-                    let parent_split_and_pos: Option<(NodeId, i32)> = (|| {
-                        let tab_id = state.current_tab_id(controller.window_id)?;
-                        let parent_id = state
-                            .workspace
-                            .borrow()
-                            .parent_split_id_of_terminal(controller.window_id, tab_id, target_terminal)?;
-                        let pos = state
-                            .controllers
-                            .borrow()
-                            .get(&controller.window_id)
-                            .and_then(|c| c.split_panes.borrow().get(&parent_id).cloned())
-                            .map(|p| p.position())?;
-                        Some((parent_id, pos))
-                    })();
+                    // Snapshot all split positions (all nested paneds) to preserve proportions across rebuild
+                    let all_positions: std::collections::HashMap<NodeId, Vec<i32>> = {
+                        let mut map = std::collections::HashMap::new();
+                        if let Some(ctrl) = state.controllers.borrow().get(&controller.window_id) {
+                            for (id, paneds) in ctrl.split_panes.borrow().iter() {
+                                let mut v = Vec::new();
+                                for p in paneds {
+                                    v.push(p.position());
+                                }
+                                map.insert(*id, v);
+                            }
+                        }
+                        map
+                    };
                     // Decide orientation and side based on drop position
                     let (orientation, insert_first) = dt
                         .widget()
                         .map(|w| controller.compute_split_decision(&w, x, y))
                         .unwrap_or((SplitOrientation::Vertical, false));
+                    // Parent split info for the drop target terminal (if splitting into same-orientation parent)
+                    let parent_info = state
+                        .current_tab_id(controller.window_id)
+                        .and_then(|tab_id| state.workspace.borrow().parent_split_info_for_terminal(controller.window_id, tab_id, target_terminal));
+                    let parent_weights: Option<(NodeId, Vec<f64>, usize)> = if let Some((pid, porient, pidx)) = parent_info {
+                        if porient == orientation {
+                            if let Some(ctrl) = state.controllers.borrow().get(&controller.window_id) {
+                                if let Some(paneds) = ctrl.split_panes.borrow().get(&pid) {
+                                    let wts = WorkspaceController::compute_weights_from_paneds(paneds, orientation);
+                                    Some((pid, wts, pidx))
+                                } else { None }
+                            } else { None }
+                        } else { None }
+                    } else { None };
                     // Apply the split honoring side: left/top inserts before; right/bottom after.
                     let ok = state
                         .workspace
@@ -2173,14 +2321,37 @@ impl WorkspaceController {
                     controller.hide_preview();
                     if ok {
                         state.rebuild_window(controller.window_id);
-                        // Restore parent split position if we have it
-                        if let Some((id, pos)) = parent_split_and_pos {
-                            if let Some(controller2) = state.controllers.borrow().get(&controller.window_id) {
-                                if let Some(paned) = controller2.split_panes.borrow().get(&id) {
-                                    paned.set_position(pos);
+                        // Restore all known split positions after widgets are realized
+                        let win_id = controller.window_id;
+                        let positions = all_positions.clone();
+                        let parent_weights = parent_weights.clone();
+                        let orient = orientation;
+                        let weak = Rc::downgrade(&state);
+                        glib::idle_add_local(move || {
+                            if let Some(state) = weak.upgrade() {
+                                if let Some(ctrl2) = state.controllers.borrow().get(&win_id) {
+                                    for (id, pos_list) in &positions {
+                                        if let Some(paneds) = ctrl2.split_panes.borrow().get(id) {
+                                            let n = std::cmp::min(paneds.len(), pos_list.len());
+                                            for i in 0..n { paneds[i].set_position(pos_list[i]); }
+                                        }
+                                    }
+                                    // If the parent was same-orientation, compute and apply new divider positions
+                                    if let Some((pid, old_weights, child_idx)) = &parent_weights {
+                                        if let Some(paneds) = ctrl2.split_panes.borrow().get(&pid) {
+                                            if old_weights.len() >= 1 && paneds.len() + 1 == old_weights.len() + 1 {
+                                                let mut new_w = Vec::with_capacity(old_weights.len() + 1);
+                                                for (i, w) in old_weights.iter().enumerate() {
+                                                    if i == *child_idx { new_w.push(w / 2.0); new_w.push(w / 2.0); } else { new_w.push(*w); }
+                                                }
+                                                WorkspaceController::apply_weights_to_paneds(paneds, &new_w, orient);
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                        }
+                            glib::ControlFlow::Break
+                        });
                         // Focus moved terminal
                         if let Some(tab_id) = state.current_tab_id(controller.window_id) {
                             state.focus_and_remember(controller.window_id, tab_id, moving);
@@ -2241,7 +2412,7 @@ impl WorkspaceController {
             // Do not claim drags on inner tab labels to keep click/edit behavior intact
 
             // Enable drag from inner tab label to avoid interacting with Paned handles
-            let payload = dnd_payload(self.window_id, Some(tab_id), Some(inner.id), inner.focus);
+            let payload = dnd_payload(DragKind::Terminal, self.window_id, Some(tab_id), Some(inner.id), inner.focus);
             self.attach_drag_source_with_owner(&label_box, payload);
 
             // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
@@ -2367,7 +2538,8 @@ impl WorkspaceController {
             let (label_box, tab_label, close_btn) = build_tab_label(tab.display_title(), tab.is_title_flexible());
 
             // Enable drag from top-level tab labels as well
-            let payload = dnd_payload(self.window_id, Some(tab.id), None, tab.active_terminal());
+            // Dragging a top-level tab label moves the whole tab content
+            let payload = dnd_payload(DragKind::Tab, self.window_id, Some(tab.id), None, tab.active_terminal());
             self.attach_drag_source_with_owner(&label_box, payload);
 
             // No press-claim here to preserve tab switching/edit; Paned resize is not a risk
@@ -2375,22 +2547,39 @@ impl WorkspaceController {
 
             // No motion overlay for top-level labels; previews only for split targets.
 
-            // Drop on top-level tab label: move existing terminal into a new top-level tab
+            // Drop on top-level tab label: if dragging a tab, move the whole tab; otherwise,
+            // move the dragged terminal into a new tab in this window.
             let drop = gtk4::DropTarget::new(DragData::static_type(), gtk4::gdk::DragAction::MOVE);
             let weak_self = Rc::downgrade(self);
             drop.connect_drop(move |_dt, value, _x, _y| {
                 let parsed = match value.get::<DragData>() { Ok(p) => p, Err(_) => return false };
-                let moving = parsed.terminal;
                 if let Some(controller) = weak_self.upgrade() {
                     if let Some(state) = controller.state.upgrade() {
-                        if let Some(new_tab) = state
-                            .workspace
-                            .borrow_mut()
-                            .move_terminal_to_new_tab(controller.window_id, moving)
-                        {
-                            state.rebuild_window(controller.window_id);
-                            state.focus_and_remember(controller.window_id, new_tab, moving);
-                            return true;
+                        match parsed.kind {
+                            DragKind::Tab => {
+                                if let (Some(src_win), Some(tab_id)) = (Some(parsed.window), parsed.tab) {
+                                    let ok = state
+                                        .workspace
+                                        .borrow_mut()
+                                        .move_tab_to_window(src_win, tab_id, controller.window_id);
+                                    if ok {
+                                        state.rebuild_window(controller.window_id);
+                                        return true;
+                                    }
+                                }
+                            }
+                            DragKind::Terminal => {
+                                let moving = parsed.terminal;
+                                if let Some(new_tab) = state
+                                    .workspace
+                                    .borrow_mut()
+                                    .move_terminal_to_new_tab(controller.window_id, moving)
+                                {
+                                    state.rebuild_window(controller.window_id);
+                                    state.focus_and_remember(controller.window_id, new_tab, moving);
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }

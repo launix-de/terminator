@@ -119,6 +119,23 @@ pub struct InnerTab {
 }
 
 impl WorkspaceModel {
+    pub fn move_tab_to_window(&mut self, src_window: WindowId, tab_id: TabId, dst_window: WindowId) -> bool {
+        if src_window == dst_window { return false; }
+        let src_idx = match self.windows.iter().position(|w| w.id == src_window) { Some(i)=>i, None=>return false };
+        let dst_idx = match self.windows.iter().position(|w| w.id == dst_window) { Some(i)=>i, None=>return false };
+        if let Some(tab_pos) = self.windows[src_idx].tabs.iter().position(|t| t.id == tab_id) {
+            let tab = self.windows[src_idx].tabs.remove(tab_pos);
+            self.windows[dst_idx].tabs.push(tab);
+            self.windows[dst_idx].active_tab = self.windows[dst_idx].tabs.len()-1;
+            if self.windows[src_idx].tabs.is_empty() {
+                self.windows.remove(src_idx);
+            } else if self.windows[src_idx].active_tab >= self.windows[src_idx].tabs.len() {
+                self.windows[src_idx].active_tab = self.windows[src_idx].tabs.len()-1;
+            }
+            true
+        } else { false }
+    }
+    #[allow(dead_code)]
     pub fn parent_split_id_of_terminal(&self, window_id: WindowId, tab_id: TabId, terminal: TerminalId) -> Option<NodeId> {
         let window = self.windows.iter().find(|w| w.id == window_id)?;
         let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
@@ -375,7 +392,9 @@ impl WorkspaceModel {
             .iter_mut()
             .find(|t| t.contains_terminal(terminal_id))?;
         let new_terminal_id = TerminalId(Uuid::new_v4());
-        let replaced = tab.replace_leaf_with_split(terminal_id, orientation, new_terminal_id);
+        let replaced = tab
+            .root
+            .replace_leaf_with_split(terminal_id, orientation, new_terminal_id);
         if replaced {
             tab.set_focus_terminal(new_terminal_id);
             Some(new_terminal_id)
@@ -731,6 +750,7 @@ impl TabModel {
         self.root.contains_terminal(id)
     }
 
+    #[allow(dead_code)]
     fn replace_leaf_with_split(
         &mut self,
         target: TerminalId,
@@ -747,6 +767,20 @@ impl TabModel {
 
     fn is_empty(&self) -> bool {
         self.root.is_empty()
+    }
+}
+
+impl WorkspaceModel {
+    /// Return the parent split NodeId, its orientation, and the child index where `terminal_id` lives.
+    pub fn parent_split_info_for_terminal(
+        &self,
+        window_id: WindowId,
+        tab_id: TabId,
+        terminal_id: TerminalId,
+    ) -> Option<(NodeId, SplitOrientation, usize)> {
+        let window = self.windows.iter().find(|w| w.id == window_id)?;
+        let tab = window.tabs.iter().find(|t| t.id == tab_id)?;
+        tab.root.find_parent_split_and_child_index(terminal_id)
     }
 }
 

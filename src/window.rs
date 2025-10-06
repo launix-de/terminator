@@ -25,7 +25,17 @@ impl TerminalRegistry {
         terminal.add_css_class("terminal");
         let entry = TerminalEntry::new(id, terminal.clone(), self.owner.clone());
         setup_terminal_theme(&terminal);
-        crate::spawn_shell(&terminal);
+        // Spawn once when the terminal is created. If the app requested a specific
+        // command (via CLI), use it; otherwise spawn the default shell.
+        if let Some(owner) = self.owner.upgrade() {
+            if let Some(exec) = owner.pending_exec.borrow_mut().take() {
+                crate::spawn_program(&terminal, exec);
+            } else {
+                crate::spawn_shell(&terminal);
+            }
+        } else {
+            crate::spawn_shell(&terminal);
+        }
         self.entries.insert(id, entry);
     }
 

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::model::{LayoutNode, TabGroup, InnerTab, TerminalLeaf, NodeId, TerminalId, InnerTabId, SplitNode, SplitOrientation};
 
 impl LayoutNode {
+    #[allow(dead_code)]
     pub fn find_parent_split_id_of_terminal(&self, target: TerminalId) -> Option<NodeId> {
         fn rec(node: &LayoutNode, target: TerminalId, current: Option<NodeId>) -> Option<NodeId> {
             match node {
@@ -76,8 +77,8 @@ impl LayoutNode {
                 }
                 false
             }
+            }
         }
-    }
     pub(crate) fn as_tab_group_mut(&mut self) -> Option<&mut TabGroup> {
         match self {
             LayoutNode::Tabs(group) => Some(group),
@@ -692,4 +693,50 @@ impl LayoutNode {
             LayoutNode::Tabs(group) => group.tabs.is_empty(),
         }
     }
+    /// Find the parent Split node id, its orientation, and the child index for a given terminal.
+    pub fn find_parent_split_and_child_index(
+        &self,
+        target: TerminalId,
+    ) -> Option<(NodeId, SplitOrientation, usize)> {
+        fn rec(
+            node: &LayoutNode,
+            target: TerminalId,
+            _current: Option<(NodeId, SplitOrientation)>,
+        ) -> Option<(NodeId, SplitOrientation, usize)> {
+            match node {
+                LayoutNode::Terminal(leaf) => {
+                    if leaf.terminal_id == target { None } else { None }
+                }
+                LayoutNode::Split(split) => {
+                    for (idx, child) in split.children.iter().enumerate() {
+                        if child.contains_terminal(target) {
+                            // If the child itself contains the target, and is a Terminal, return this as parent
+                            match child {
+                                LayoutNode::Terminal(leaf) if leaf.terminal_id == target => {
+                                    return Some((split.node_id, split.orientation, idx));
+                                }
+                                _ => {
+                                    if let Some(found) = rec(child, target, Some((split.node_id, split.orientation))) {
+                                        return Some(found);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+                LayoutNode::Tabs(group) => {
+                    for inner in &group.tabs {
+                        if let Some(found) = rec(&inner.root, target, _current) {
+                            return Some(found);
+                        }
+                    }
+                    None
+                }
+            }
+        }
+        rec(self, target, None)
+    }
+
+    // (merged split helper functions removed in this revision)
 }
